@@ -4,6 +4,14 @@ from skimage.measure import moments_hu, regionprops_table
 from skimage.morphology import label
 from sklearn.preprocessing import StandardScaler
 
+# Exceções documentadas à regra de vetorização (seção 7.2 do projeto):
+# 1. graycomatrix — não possui API vetorizada em lote; opera imagem a imagem.
+# 2. moments_hu — idem; processa uma imagem 2D por chamada.
+# 3. regionprops_table — idem; requer imagem rotulada individual.
+# 4. hog — idem; skimage.feature.hog não é batch-vectorized.
+# Todas são limitações legítimas das bibliotecas subjacentes,
+# não escolhas de implementação.
+
 
 def extrair_descritores_glcm(
     lote_imagens_cinza: np.ndarray,

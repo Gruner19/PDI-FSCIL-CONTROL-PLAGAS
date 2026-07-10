@@ -1,5 +1,6 @@
 import numpy as np
-from typing import Callable, Dict, List, Optional, Tuple
+import pandas as pd
+from typing import Dict, List, Optional, Tuple
 
 from src.dataset_loader import preparar_dados_sessao
 from src.preprocessing import pipeline_completo_preprocessamento
@@ -147,6 +148,8 @@ class GerenciadorDeSessoes:
             if len(dados_teste["imagens"]) == 0:
                 self.historico_acuracias.append(0.0)
                 self.historico_matrizes.append(np.empty((0, 0)))
+                if self.historico_por_classe is None:
+                    self.historico_por_classe = np.empty((0, 0))
                 return
             caracteristicas = self._extrair_caracteristicas_lote(
                 dados_teste["imagens"]
@@ -161,6 +164,33 @@ class GerenciadorDeSessoes:
                 rotulos_reais, rotulos_preditos, classes=classes_ordenadas
             )
         )
+        classes_unicas = np.unique(rotulos_reais)
+        vetor_sessao = np.array([
+            np.mean(rotulos_preditos[rotulos_reais == classe] == classe)
+            if np.any(rotulos_reais == classe) else 0.0
+            for classe in range(int(max(classes_unicas)) + 1)
+        ])
+        if self.historico_por_classe is None:
+            self.historico_por_classe = vetor_sessao.reshape(-1, 1)
+        else:
+            linhas_atuais = self.historico_por_classe.shape[0]
+            if len(vetor_sessao) > linhas_atuais:
+                extensao = np.zeros((len(vetor_sessao) - linhas_atuais, self.historico_por_classe.shape[1]))
+                self.historico_por_classe = np.vstack([self.historico_por_classe, extensao])
+            elif len(vetor_sessao) < linhas_atuais:
+                vetor_completo = np.copy(self.historico_por_classe[:, -1])
+                for classe in classes_unicas:
+                    if int(classe) < len(vetor_completo):
+                        acerto = np.mean(rotulos_preditos[rotulos_reais == classe] == classe)
+                        vetor_completo[int(classe)] = acerto
+                vetor_sessao = vetor_completo
+            coluna_nova = np.zeros((self.historico_por_classe.shape[0], 1))
+            for classe in classes_unicas:
+                if int(classe) < len(coluna_nova):
+                    coluna_nova[int(classe)] = np.mean(
+                        rotulos_preditos[rotulos_reais == classe] == classe
+                    )
+            self.historico_por_classe = np.hstack([self.historico_por_classe, coluna_nova])
 
     def obter_relatorio(self) -> Dict[str, object]:
         """Gera o relatório completo de todas as sessões executadas até o momento."""

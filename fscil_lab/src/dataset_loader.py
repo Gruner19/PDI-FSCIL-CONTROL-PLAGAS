@@ -26,14 +26,14 @@ def gerar_dataset_sintetico(
 
 
 def carregar_dataset_bruto(
-    nome_dataset: str, diretorio_dados: str
+    nome_dataset: str, diretorio_dados: str, baixar_automaticamente: bool = False
 ) -> Dict[str, object]:
     if nome_dataset.lower() == "cifar100":
         return _carregar_cifar100(diretorio_dados)
     elif nome_dataset.lower() == "plantvillage":
-        return _carregar_plantvillage(diretorio_dados)
+        return _carregar_plantvillage(diretorio_dados, baixar_automaticamente)
     elif nome_dataset.lower() == "plantdoc":
-        return _carregar_plantdoc(diretorio_dados)
+        return _carregar_plantdoc(diretorio_dados, baixar_automaticamente)
     elif nome_dataset.lower() == "sintetico":
         return gerar_dataset_sintetico(semente_aleatoria=42)
     else:
@@ -102,14 +102,21 @@ def _baixar_cifar100(caminho_cache: Path) -> None:
     print("CIFAR-100 pronto.")
 
 
-def _carregar_plantvillage(diretorio_dados: str) -> Dict[str, object]:
+def _carregar_plantvillage(diretorio_dados: str, baixar_automaticamente: bool = False) -> Dict[str, object]:
     caminho_raiz = Path(diretorio_dados) / "plantvillage" / "color"
     if not caminho_raiz.exists():
-        raise FileNotFoundError(
-            f"Diretório PlantVillage não encontrado em {caminho_raiz}. "
-            "Faça o download em https://www.kaggle.com/datasets/emmarex/plantdisease "
-            "e extraia para data/raw/plantvillage/"
-        )
+        if baixar_automaticamente:
+            _baixar_plantvillage(caminho_raiz.parent)
+        else:
+            raise FileNotFoundError(
+                f"Diretório PlantVillage não encontrado em {caminho_raiz}. "
+                "Passe baixar_automaticamente=True ou baixe manualmente de:\n"
+                "  https://github.com/spMohanty/PlantVillage-Dataset/raw/master/raw/color.zip\n"
+                "e extraia para data/raw/plantvillage/ de modo que a estrutura seja:\n"
+                "  plantvillage/color/Apple___Apple_scab/\n"
+                "  plantvillage/color/Tomato___Late_blight/\n"
+                "  ..."
+            )
     from skimage.io import imread
 
     classes = sorted(os.listdir(caminho_raiz))
@@ -143,14 +150,109 @@ def _carregar_plantvillage(diretorio_dados: str) -> Dict[str, object]:
     }
 
 
-def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
+def _baixar_plantvillage(diretorio_destino: Path) -> None:
+    """Download automático do PlantVillage. Tenta GitHub LFS, depois HuggingFace, depois fallback manual."""
+    import zipfile
+    import shutil
+
+    def _extrair_zip(caminho_zip: Path) -> None:
+        with zipfile.ZipFile(caminho_zip, "r") as zf:
+            zf.extractall(path=diretorio_destino)
+        caminho_zip.unlink()
+
+    def _tentar_github_lfs() -> bool:
+        url_zip = "https://raw.githubusercontent.com/spMohanty/PlantVillage-Dataset/master/raw/color.zip"
+        arquivo_zip = diretorio_destino / "color.zip"
+        print(f"Tentando GitHub LFS: {url_zip}")
+        classe_abridor = urllib.request.build_opener(
+            urllib.request.HTTPRedirectHandler(),
+            urllib.request.HTTPSHandler(),
+        )
+        urllib.request.install_opener(classe_abridor)
+        try:
+            urllib.request.urlretrieve(url_zip, arquivo_zip)
+            _extrair_zip(arquivo_zip)
+            return True
+        except Exception as erro:
+            if arquivo_zip.exists():
+                arquivo_zip.unlink()
+            print(f"GitHub LFS falhou: {erro}")
+            return False
+
+    def _tentar_kagglehub() -> bool:
+        try:
+            import kagglehub
+            print("Tentando kagglehub...")
+            caminho = kagglehub.dataset_download("abdallahalidev/plantvillage-dataset")
+            caminho_origem = Path(caminho)
+            for item in caminho_origem.iterdir():
+                destino = diretorio_destino / item.name
+                if item.is_dir():
+                    shutil.copytree(item, destino, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, destino)
+            return True
+        except ImportError:
+            return False
+        except Exception as erro:
+            print(f"kagglehub falhou: {erro}")
+            return False
+
+    def _tentar_huggingface() -> bool:
+        try:
+            from datasets import load_dataset
+            print("Tentando HuggingFace Datasets...")
+            dataset = load_dataset("aryamanhm/PlantVillage", trust_remote_code=True)
+            diretorio_imagens = diretorio_destino / "color"
+            diretorio_imagens.mkdir(parents=True, exist_ok=True)
+            for exemplo in dataset["train"]:
+                imagem = exemplo["image"]
+                classe = exemplo["label"]
+                rotulo = dataset["train"].features["label"].int2str(classe)
+                pasta_classe = diretorio_imagens / rotulo
+                pasta_classe.mkdir(parents=True, exist_ok=True)
+                caminho_imagem = pasta_classe / f"{exemplo['image'].filename}"
+                imagem.save(caminho_imagem)
+            return True
+        except ImportError:
+            return False
+        except Exception as erro:
+            print(f"HuggingFace falhou: {erro}")
+            return False
+
+    diretorio_destino.mkdir(parents=True, exist_ok=True)
+    if _tentar_github_lfs():
+        print("PlantVillage baixado via GitHub LFS.")
+        return
+    if _tentar_kagglehub():
+        print("PlantVillage baixado via KaggleHub.")
+        return
+    if _tentar_huggingface():
+        print("PlantVillage baixado via HuggingFace.")
+        return
+    raise RuntimeError(
+        "Não foi possível baixar o PlantVillage automaticamente. "
+        "Instale uma das bibliotecas auxiliares:\n"
+        "  pip install kagglehub\n"
+        "  pip install datasets\n"
+        "Ou baixe manualmente de:\n"
+        "  https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset\n"
+        "e extraia para data/raw/plantvillage/color/"
+    )
+
+
+def _carregar_plantdoc(diretorio_dados: str, baixar_automaticamente: bool = False) -> Dict[str, object]:
     caminho_raiz = Path(diretorio_dados) / "plantdoc"
     if not caminho_raiz.exists():
-        raise FileNotFoundError(
-            f"Diretório PlantDoc não encontrado em {caminho_raiz}. "
-            "Faça o download em https://www.kaggle.com/datasets/noulam/plantdoc "
-            "e extraia para data/raw/plantdoc/"
-        )
+        if baixar_automaticamente:
+            _baixar_plantdoc(caminho_raiz)
+        else:
+            raise FileNotFoundError(
+                f"Diretório PlantDoc não encontrado em {caminho_raiz}. "
+                "Passe baixar_automaticamente=True ou baixe manualmente de:\n"
+                "  https://github.com/pratikkayal/PlantDoc-Dataset/archive/refs/heads/master.zip\n"
+                "e extraia para data/raw/plantdoc/"
+            )
     from skimage.io import imread
 
     classes = sorted(os.listdir(caminho_raiz))
@@ -182,6 +284,71 @@ def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
         "rotulos": rotulos,
         "nomes_classes": classes,
     }
+
+
+def _baixar_plantdoc(diretorio_destino: Path) -> None:
+    """Download automático do PlantDoc do GitHub oficial."""
+    import zipfile
+    import shutil
+
+    def _tentar_github_zip() -> bool:
+        url_zip = "https://github.com/pratikkayal/PlantDoc-Dataset/archive/refs/heads/master.zip"
+        arquivo_zip = diretorio_destino.parent / "plantdoc-master.zip"
+        print(f"Tentando GitHub: {url_zip}")
+        classe_abridor = urllib.request.build_opener(
+            urllib.request.HTTPRedirectHandler(),
+            urllib.request.HTTPSHandler(),
+        )
+        urllib.request.install_opener(classe_abridor)
+        try:
+            urllib.request.urlretrieve(url_zip, arquivo_zip)
+            with zipfile.ZipFile(arquivo_zip, "r") as zf:
+                zf.extractall(path=diretorio_destino.parent)
+            arquivo_zip.unlink()
+            pasta_extraida = diretorio_destino.parent / "PlantDoc-Dataset-master"
+            if pasta_extraida.exists() and not diretorio_destino.exists():
+                shutil.move(str(pasta_extraida), str(diretorio_destino))
+            return True
+        except Exception as erro:
+            if arquivo_zip.exists():
+                arquivo_zip.unlink()
+            print(f"GitHub falhou: {erro}")
+            return False
+
+    def _tentar_kagglehub() -> bool:
+        try:
+            import kagglehub
+            print("Tentando kagglehub...")
+            caminho = kagglehub.dataset_download("noulam/plantdoc")
+            caminho_origem = Path(caminho)
+            diretorio_destino.mkdir(parents=True, exist_ok=True)
+            for item in caminho_origem.iterdir():
+                destino = diretorio_destino / item.name
+                if item.is_dir():
+                    shutil.copytree(item, destino, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, destino)
+            return True
+        except ImportError:
+            return False
+        except Exception as erro:
+            print(f"kagglehub falhou: {erro}")
+            return False
+
+    diretorio_destino.mkdir(parents=True, exist_ok=True)
+    if _tentar_github_zip():
+        print("PlantDoc baixado via GitHub.")
+        return
+    if _tentar_kagglehub():
+        print("PlantDoc baixado via KaggleHub.")
+        return
+    raise RuntimeError(
+        "Não foi possível baixar o PlantDoc automaticamente.\n"
+        "  Instale: pip install kagglehub\n"
+        "Ou baixe manualmente de:\n"
+        "  https://www.kaggle.com/datasets/noulam/plantdoc\n"
+        "e extraia para data/raw/plantdoc/"
+    )
 
 
 def dividir_em_sessoes(

@@ -28,6 +28,14 @@ from src.metrics import (
 )
 from src.dataset_loader import preparar_dados_sessao as _preparar_dados_sessao
 from src.utils import dicionario_para_json
+from src.pest_guide import (
+    GUIA_COMPLETA,
+    obtener_nombre_comun,
+    obtener_cultivo,
+    listar_por_cultivo,
+    listar_por_tipo,
+    obtener_estadisticas,
+)
 
 st.set_page_config(
     page_title="FSCIL-Lab — Diagnóstico Fitossanitário Incremental",
@@ -38,6 +46,19 @@ st.set_page_config(
 st.sidebar.title("FSCIL-Lab")
 st.sidebar.markdown("Diagnóstico incremental de doenças foliares")
 st.sidebar.markdown("---")
+
+
+EMOJI_TIPO = {"enfermedad": "fungus", "plaga": "bug", "sano": "leaf"}
+NOMBRE_TIPO = {"enfermedad": "Enfermedad", "plaga": "Plaga", "sano": "Sano"}
+
+
+def formatear_nombre_plaga(clave: str) -> str:
+    info = GUIA_COMPLETA.get(clave, {})
+    if info:
+        tipo = info.get("tipo", "enfermedad")
+        emoji = EMOJI_TIPO.get(tipo, "")
+        return f"{info['nombre_comun']} ({info['cultivo']})"
+    return clave.replace("___", " - ").replace("_", " ")
 
 
 def inicializar_estado():
@@ -254,23 +275,23 @@ def renderizar_aba_configuracao():
         st.markdown(
             "**Nota:** Dataset Sintético gera dados aleatórios localmente (mais rápido). "
             "CIFAR-100 requer download de ~160 MB na primeira execução. "
-            "PlantVillage e PlantDoc requerem download manual."
+            "PlantVillage (~1.2 GB) e PlantDoc (~600 MB) também podem baixar automaticamente "
+            "do GitHub oficial ao clicar em 'Carregar'."
         )
-        botao_configurar = st.form_submit_button("Carregar e Configurar", type="primary")
+        botao_configurar = st.form_submit_button("Carregar e Configurar (com download automático)", type="primary")
     if botao_configurar:
         with st.spinner("Carregando dataset..."):
             try:
-                dados_brutos = carregar_dataset_bruto(nome_dataset, pasta_dados)
+                baixar_auto = nome_dataset in ("plantvillage", "plantdoc")
+                dados_brutos = carregar_dataset_bruto(
+                    nome_dataset, pasta_dados, baixar_automaticamente=baixar_auto
+                )
                 st.success(
                     f"Dataset carregado: {dados_brutos['imagens'].shape[0]} imagens, "
                     f"{len(np.unique(dados_brutos['rotulos']))} classes."
                 )
             except Exception as erro:
                 st.error(f"Erro ao carregar dataset: {erro}")
-                st.info(
-                    "Dica: para CIFAR-100, instale tensorflow: pip install tensorflow. "
-                    "Para PlantVillage/PlantDoc, baixe manualmente e ajuste o diretório."
-                )
                 return
         with st.spinner("Dividindo sessões..."):
             sessoes = dividir_em_sessoes(
@@ -328,10 +349,36 @@ def renderizar_aba_execucao():
     st.markdown(f"### Sessão incremental {sessao_atual + 1} de {total_sessoes_inc}")
     classes_nesta_sessao = sessoes_incrementais[sessao_atual]
     nomes = gerenciador.memoria.obter_mapeamento_classes_para_nomes()
-    st.markdown("**Novas doenças desta safra:**")
+    st.markdown("**Nuevas enfermedades/plagas de esta campaña:**")
+    dados_plagas = []
     for classe in classes_nesta_sessao:
-        nome = nomes.get(int(classe), f"Classe {classe}")
-        st.markdown(f"- {nome} (ID {classe})")
+        clave = nomes.get(int(classe), f"Classe {classe}")
+        info = GUIA_COMPLETA.get(clave, {})
+        dados_plagas.append({
+            "Nombre común": formatear_nombre_plaga(clave),
+            "Cultivo": info.get("cultivo", "-"),
+            "Tipo": NOMBRE_TIPO.get(info.get("tipo", ""), "Desconocido"),
+            "Agente causal": info.get("agente_causal", "-"),
+            "Síntomas": info.get("sintomas", "-"),
+        })
+    import pandas as pd
+    st.dataframe(pd.DataFrame(dados_plagas), width="stretch", hide_index=True)
+    with st.expander("Ver imágenes de ejemplo de las nuevas clases"):
+        for classe in classes_nesta_sessao:
+            clave = nomes.get(int(classe), f"Classe {classe}")
+            info = GUIA_COMPLETA.get(clave, {})
+            dados_amostra = _preparar_dados_sessao(
+                gerenciador.dados_brutos,
+                [int(classe)],
+                quantidade_por_classe=3,
+                semente_aleatoria=gerenciador.semente_aleatoria + sessao_atual,
+                modo_treino=False,
+            )
+            st.markdown(f"**{formatear_nombre_plaga(clave)}**")
+            cols_imgs = st.columns(min(3, len(dados_amostra["imagens"])))
+            for idx_col, (col_img, img) in enumerate(zip(cols_imgs, dados_amostra["imagens"][:3])):
+                with col_img:
+                    st.image(img, width=120, caption=f"Ejemplo {idx_col + 1}")
     k_shot = st.number_input(
         "K (exemplos por classe para esta sessão)",
         min_value=1,
@@ -400,24 +447,57 @@ def renderizar_aba_resultados():
     fig_curva, ax_curva = plt.subplots(figsize=(10, 5))
     plotar_curva_acuracia(resultados["historico_acuracias"], ax=ax_curva)
     st.pyplot(fig_curva)
+    gerenciador = st.session_state.gerenciador
+    memoria = gerenciador.memoria
+    nomes = memoria.obter_mapeamento_classes_para_nomes()
+    rotulos_ordenados = memoria.obter_rotulos_ordenados()
+
+    st.subheader("Diagnósticos disponibles en la memoria")
+    dados_tabela_clases = []
+    for r in rotulos_ordenados:
+        clave = nomes.get(int(r), "")
+        info = GUIA_COMPLETA.get(clave, {})
+        tipo = info.get("tipo", "desconocido") if info else "desconocido"
+        dados_tabela_clases.append({
+            "ID": r,
+            "Nombre común": formatear_nombre_plaga(clave),
+            "Cultivo": info.get("cultivo", obtener_cultivo(clave)) if clave else "-",
+            "Tipo": tipo.capitalize(),
+        })
+    if dados_tabela_clases:
+        import pandas as pd
+        st.dataframe(pd.DataFrame(dados_tabela_clases), width="stretch", hide_index=True)
+
     if len(resultados["historico_matrizes"]) > 0:
-        st.subheader("Matriz de Confusão da Última Sessão")
+        st.subheader("Matriz de Confusión - Última Sesión")
         matriz = resultados["historico_matrizes"][-1]
         if matriz.size > 0:
-            gerenciador = st.session_state.gerenciador
-            rotulos_ordenados = gerenciador.memoria.obter_rotulos_ordenados()
-            nomes = gerenciador.memoria.obter_mapeamento_classes_para_nomes()
             classes_nomes = [
-                nomes.get(int(r), f"Classe {r}") for r in rotulos_ordenados
+                formatear_nombre_plaga(nomes.get(int(r), f"Classe {r}"))
+                for r in rotulos_ordenados
             ]
             if matriz.shape[0] == len(classes_nomes):
-                fig_matriz, ax_matriz = plt.subplots(figsize=(9, 8))
+                fig_matriz, ax_matriz = plt.subplots(figsize=(10, 9))
                 plotar_matriz_confusao(matriz, classes_nomes, ax=ax_matriz)
                 st.pyplot(fig_matriz)
             else:
-                st.info("Matriz de confusão disponível (dimensões incompatíveis para rótulos).")
-    with st.expander("Dados brutos (JSON)"):
+                st.info("Matriz de confusión disponible (dimensiones incompatibles).")
+    with st.expander("Datos brutos (JSON)"):
         st.code(dicionario_para_json(resultados), language="json")
+    with st.expander("Descargar resultados (CSV)"):
+        import pandas as pd
+        datos_csv = {"Sesión": [], "Precisión": []}
+        for indice, valor in enumerate(resultados["historico_acuracias"]):
+            datos_csv["Sesión"].append(indice)
+            datos_csv["Precisión"].append(valor)
+        df_csv = pd.DataFrame(datos_csv)
+        csv_bytes = df_csv.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Descargar CSV de precisión por sesión",
+            data=csv_bytes,
+            file_name="fscil_resultados_precision.csv",
+            mime="text/csv",
+        )
 
 
 def renderizar_aba_espaco():
@@ -504,26 +584,34 @@ def renderizar_aba_demo():
         if memoria.prototipos is not None:
             distancias, indices_ordenados = memoria.obter_distancias(caracteristicas)
             distancias_ordenadas = distancias[0, indices_ordenados[0]]
-            st.subheader("Resultado do Diagnóstico")
+            st.subheader("Resultado del Diagnóstico")
             classe_predita = memoria.classificar(caracteristicas)[0]
-            nome_predito = nomes_classes.get(
+            clave_predita = nomes_classes.get(
                 int(classe_predita), f"Classe {classe_predita}"
             )
+            info_predita = GUIA_COMPLETA.get(clave_predita, {})
             distancia_minima = distancias_ordenadas[0]
             confianca = 1.0 / (1.0 + distancia_minima)
-            st.metric("Diagnóstico", nome_predito)
-            st.metric("Confiança (1/(1+d))", f"{confianca:.4f}")
-            st.markdown("#### Top-3 classes mais próximas")
+            col_d1, col_d2, col_d3 = st.columns(3)
+            col_d1.metric("Diagnóstico", formatear_nombre_plaga(clave_predita))
+            col_d2.metric("Confianza (1/(1+d))", f"{confianca:.4f}")
+            col_d3.metric("Tipo", NOMBRE_TIPO.get(info_predita.get("tipo", ""), "-"))
+            if info_predita:
+                with st.expander("Ver detalles de esta plaga/enfermedad", expanded=True):
+                    st.markdown(f"**Agente causal:** {info_predita.get('agente_causal', '-')}")
+                    st.markdown(f"**Síntomas:** {info_predita.get('sintomas', '-')}")
+                    st.markdown(f"**Tratamiento sugerido:** {info_predita.get('tratamiento', '-')}")
+            st.markdown("#### Top-3 clases más cercanas")
             dados_tabela = []
             for rank in range(min(3, len(distancias_ordenadas))):
                 indice = indices_ordenados[0, rank]
                 rotulo = gerenciador.memoria.mapeamento_indice_para_classe[indice]
-                nome = nomes_classes.get(int(rotulo), f"Classe {rotulo}")
+                clave = nomes_classes.get(int(rotulo), f"Classe {rotulo}")
                 dados_tabela.append(
                     {
                         "Rank": rank + 1,
-                        "Classe": nome,
-                        "Distância Euclidiana": f"{distancias_ordenadas[rank]:.4f}",
+                        "Nombre común": formatear_nombre_plaga(clave),
+                        "Distancia Euclidiana": f"{distancias_ordenadas[rank]:.4f}",
                     }
                 )
             import pandas as pd
@@ -531,27 +619,80 @@ def renderizar_aba_demo():
             st.table(pd.DataFrame(dados_tabela))
             if confianca < 0.3:
                 st.warning(
-                    "Confiança baixa em todas as classes conhecidas. "
-                    "Pode ser uma doença nova! Considere cadastrá-la."
+                    "Confianza baja en todas las clases conocidas. "
+                    "Podría ser una enfermedad/plaga nueva. Considere registrar una nueva clase."
                 )
-                if st.button("Cadastrar como doença nova", type="secondary"):
+                if st.button("Registrar como nueva enfermedad", type="secondary"):
                     st.info(
-                        "Funcionalidade de cadastro de nova classe seria acionada aqui. "
-                        "No fluxo real, o usuário forneceria K fotos e confirmaria o diagnóstico."
+                        "Esta funcionalidad permite al usuario proporcionar K fotos "
+                        "y confirmar el diagnóstico para incorporar la nueva clase al sistema."
                     )
         else:
             st.warning("Memória de protótipos vazia. Execute a sessão base primeiro.")
 
 
+def renderizar_aba_guia():
+    st.header("Guía de Plagas y Enfermedades Foliares")
+    st.markdown(
+        "Base de datos de referencia con información sobre las enfermedades, plagas "
+        "y estados sanos disponibles en el dataset **PlantVillage**. "
+        "Utilice esta guía para identificar visualmente los diagnósticos que su sistema puede reconocer."
+    )
+    estadisticas = obtener_estadisticas()
+    col_g1, col_g2, col_g3, col_g4 = st.columns(4)
+    col_g1.metric("Total clases", estadisticas["total_clases"])
+    col_g2.metric("Cultivos", estadisticas["total_cultivos"])
+    col_g3.metric("Enfermedades", estadisticas["enfermedades"])
+    col_g4.metric("Plagas", estadisticas["plagas"])
+    tab_por_cultivo, tab_por_tipo, tab_tabela = st.tabs(
+        ["Por cultivo", "Por tipo", "Tabla completa"]
+    )
+    with tab_por_cultivo:
+        for cultivo, clases in listar_por_cultivo().items():
+            with st.expander(f"{cultivo} ({len(clases)} clases)"):
+                for item in clases:
+                    tipo_label = NOMBRE_TIPO.get(item.get("tipo", ""), "Desconocido")
+                    st.markdown(
+                        f"- **{item['nombre_comun']}** "
+                        f"({tipo_label}) — {item.get('sintomas', '')[:100]}..."
+                    )
+    with tab_por_tipo:
+        for tipo, clases in listar_por_tipo().items():
+            if not clases:
+                continue
+            tipo_label = NOMBRE_TIPO.get(tipo, tipo)
+            with st.expander(f"{tipo_label} ({len(clases)} clases)"):
+                for item in clases:
+                    st.markdown(
+                        f"- **{item['nombre_comun']}** (cultivo: {item['cultivo']}) — "
+                        f"{item.get('agente_causal', '')}"
+                    )
+    with tab_tabela:
+        import pandas as pd
+        filas = []
+        for clave, info in GUIA_COMPLETA.items():
+            filas.append({
+                "Clave dataset": clave,
+                "Nombre común": info["nombre_comun"],
+                "Cultivo": info["cultivo"],
+                "Tipo": NOMBRE_TIPO.get(info.get("tipo", ""), info.get("tipo", "")),
+                "Agente causal": info["agente_causal"],
+                "Síntomas": info["sintomas"][:80] + "...",
+                "Tratamiento": info["tratamiento"][:80] + "...",
+            })
+        st.dataframe(pd.DataFrame(filas), width="stretch", hide_index=True)
+
+
 def main():
     inicializar_estado()
-    tab_config, tab_exec, tab_result, tab_espaco, tab_demo = st.tabs(
+    tab_config, tab_exec, tab_result, tab_espaco, tab_demo, tab_guia = st.tabs(
         [
-            "Configuração",
-            "Execução Incremental",
+            "Configuración",
+            "Ejecución Incremental",
             "Resultados",
-            "Espaço de Características",
+            "Espacio de Características",
             "Diagnóstico de Campo",
+            "Guía de Plagas",
         ]
     )
     with tab_config:
@@ -564,6 +705,8 @@ def main():
         renderizar_aba_espaco()
     with tab_demo:
         renderizar_aba_demo()
+    with tab_guia:
+        renderizar_aba_guia()
 
 
 if __name__ == "__main__":

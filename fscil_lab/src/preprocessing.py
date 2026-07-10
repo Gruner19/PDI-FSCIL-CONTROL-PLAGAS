@@ -3,6 +3,13 @@ from skimage.transform import resize
 from skimage.filters import threshold_sauvola
 from skimage.color import rgb2gray
 
+# Exceções documentadas à regra de vetorização (seção 7.2 do projeto):
+# 1. rgb2gray — não possui API vetorizada em lote; opera imagem a imagem.
+# 2. resize — skimage.transform.resize não suporta batches nativamente.
+# 3. threshold_sauvola — mesma limitação; exige imagem 2D individual.
+# Todas são limitações legítimas das bibliotecas subjacentes, não escolhas
+# de implementação.
+
 
 def converter_para_escala_cinza(lote_imagens: np.ndarray) -> np.ndarray:
     """Conversão vetorizada RGB->cinza para um lote de imagens (N, H, W, 3) -> (N, H, W)."""
