@@ -7,6 +7,24 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+def gerar_dataset_sintetico(
+    quantidade_imagens: int = 5000,
+    numero_classes: int = 50,
+    altura: int = 64,
+    largura: int = 64,
+    semente_aleatoria: int = 42,
+) -> Dict[str, object]:
+    """Gera dataset sintético para testes, sem necessidade de download."""
+    gerador = np.random.default_rng(semente_aleatoria)
+    imagens = gerador.integers(0, 256, size=(quantidade_imagens, altura, largura, 3), dtype=np.uint8)
+    for indice in range(quantidade_imagens):
+        ruido = gerador.normal(128, 40, size=(altura, largura, 3)).astype(np.uint8)
+        imagens[indice] = np.clip(imagens[indice] * 0.3 + ruido * 0.7, 0, 255).astype(np.uint8)
+    rotulos = np.array([indice % numero_classes for indice in range(quantidade_imagens)], dtype=np.int64)
+    nomes_classes = [f"Classe_Sintetica_{indice:02d}" for indice in range(numero_classes)]
+    return {"imagens": imagens, "rotulos": rotulos, "nomes_classes": nomes_classes}
+
+
 def carregar_dataset_bruto(
     nome_dataset: str, diretorio_dados: str
 ) -> Dict[str, object]:
@@ -16,9 +34,11 @@ def carregar_dataset_bruto(
         return _carregar_plantvillage(diretorio_dados)
     elif nome_dataset.lower() == "plantdoc":
         return _carregar_plantdoc(diretorio_dados)
+    elif nome_dataset.lower() == "sintetico":
+        return gerar_dataset_sintetico(semente_aleatoria=42)
     else:
         raise ValueError(
-            f"Dataset '{nome_dataset}' não suportado. Opções: cifar100, plantvillage, plantdoc."
+            f"Dataset '{nome_dataset}' não suportado. Opções: cifar100, sintetico, plantvillage, plantdoc."
         )
 
 
@@ -56,6 +76,11 @@ def _baixar_cifar100(caminho_cache: Path) -> None:
     url = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
     arquivo_tar = caminho_cache / "cifar-100-python.tar.gz"
     print(f"Baixando CIFAR-100 de {url}...")
+    classe_abridor = urllib.request.build_opener(
+        urllib.request.HTTPRedirectHandler(),
+        urllib.request.HTTPSHandler(),
+    )
+    urllib.request.install_opener(classe_abridor)
     urllib.request.urlretrieve(url, arquivo_tar)
     print("Extraindo arquivos...")
     with tarfile.open(arquivo_tar, "r:gz") as tar:

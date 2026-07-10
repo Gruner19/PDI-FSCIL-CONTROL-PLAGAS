@@ -58,7 +58,8 @@ def inicializar_estado():
 
 def obter_nomes_dataset(dataset: str) -> list:
     exemplos = {
-        "CIFAR-100 (protótipo)": [
+        "Sintético (teste rápido)": [f"Classe_Sintetica_{i:02d}" for i in range(50)],
+        "CIFAR-100": [
             "apple", "aquarium_fish", "baby", "bear", "beaver",
             "bed", "bee", "beetle", "bicycle", "bottle",
             "bowl", "boy", "bridge", "bus", "butterfly",
@@ -208,11 +209,13 @@ def renderizar_aba_configuracao():
         with col1:
             dataset_escolhido = st.selectbox(
                 "Dataset",
-                ["CIFAR-100 (protótipo)", "PlantVillage", "PlantDoc"],
-                help="CIFAR-100 é usado como dataset protótipo para testes.",
+                ["Sintético (teste rápido)", "CIFAR-100", "PlantVillage", "PlantDoc"],
+                help="Sintético gera dados aleatórios para testar o pipeline sem download.",
             )
             nome_dataset = (
-                "cifar100"
+                "sintetico"
+                if "Sintético" in dataset_escolhido
+                else "cifar100"
                 if "CIFAR" in dataset_escolhido
                 else "plantvillage"
                 if "PlantVillage" in dataset_escolhido
@@ -249,7 +252,8 @@ def renderizar_aba_configuracao():
             incluir_hog = st.checkbox("Incluir descritores HOG", value=False)
         st.markdown("---")
         st.markdown(
-            "**Nota:** CIFAR-100 será baixado automaticamente via TensorFlow/Keras. "
+            "**Nota:** Dataset Sintético gera dados aleatórios localmente (mais rápido). "
+            "CIFAR-100 requer download de ~160 MB na primeira execução. "
             "PlantVillage e PlantDoc requerem download manual."
         )
         botao_configurar = st.form_submit_button("Carregar e Configurar", type="primary")
