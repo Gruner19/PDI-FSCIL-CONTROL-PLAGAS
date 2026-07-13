@@ -33,7 +33,7 @@ else
         wget --continue --show-progress "$URL_CIFAR" -O /tmp/cifar-100-python.tar.gz
     fi
     tar -xzf /tmp/cifar-100-python.tar.gz -C /tmp/
-    mv /tmp/cifar-100-python/*.pkl "$CIFAR_DIR/"
+    mv /tmp/cifar-100-python/train /tmp/cifar-100-python/test /tmp/cifar-100-python/meta "$CIFAR_DIR/"
     rm -rf /tmp/cifar-100-python /tmp/cifar-100-python.tar.gz
     echo "  ✓ CIFAR-100 en $CIFAR_DIR"
 fi

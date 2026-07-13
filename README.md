@@ -120,6 +120,7 @@ Imagens RGB
 | pandas           | ≥2.0   | Tabelas e agregação de dados                     |
 | matplotlib       | ≥3.7   | Gráficos e visualizações                         |
 | SciPy            | ≥1.11  | Distância euclidiana vetorizada (cdist)          |
+| huggingface-hub  | —      | Download de datasets via Hugging Face (opcional) |
 
 ---
 
@@ -188,6 +189,7 @@ PDI-FSCIL-CONTROL-PLAGAS/
 │   ├── app.py                         # Interface Streamlit (6 abas)
 │   ├── requirements.txt               # Dependências Python
 │   ├── download_datasets.sh           # Script de download dos datasets
+│   ├── organize_datasets.sh           # Script para organizar a estrutura dos datasets
 │   ├── data/
 │   │   ├── raw/                       # Datasets brutos (gitignored)
 │   │   │   ├── cifar100/              # CIFAR-100 (meta, train, test)
@@ -209,6 +211,8 @@ PDI-FSCIL-CONTROL-PLAGAS/
 │   │   └── test_pipeline.py           # Testes unitários
 │   └── notebooks/
 │       └── validacao_pipeline.ipynb   # Notebook de validação
+└── docs/
+    └── screenshots/                   # Capturas de tela para o manual
 ```
 
 ---
@@ -235,6 +239,8 @@ pip install -r fscil_lab/requirements.txt
 
 ## Download dos Datasets
 
+### 1. Download automático
+
 Execute o script incluso:
 
 ```bash
@@ -243,13 +249,27 @@ Execute o script incluso:
 
 O script baixa automaticamente:
 
-| Dataset       | Tamanho | Estrutura final                                        |
-|---------------|---------|--------------------------------------------------------|
-| CIFAR-100     | ~170 MB | `data/raw/cifar100/{meta, train, test}`                |
-| PlantVillage  | ~800 MB | `data/raw/plantvillage/color/{Classe}/`                |
-| PlantDoc      | ~650 MB | `data/raw/plantdoc/{Classe}/`                          |
+| Dataset       | Tamanho | Fonte                       | Método de descarga                          |
+|---------------|---------|-----------------------------|---------------------------------------------|
+| CIFAR-100     | ~170 MB | CS Toronto / Hugging Face   | `aria2c` (multi-thread) → `axel` → `wget`   |
+| PlantVillage  | ~800 MB | Hugging Face (recomendado)  | `snapshot_download` via `huggingface-hub`    |
+| PlantDoc      | ~150 MB | GitHub                      | `wget` + `unzip`                            |
 
-Após a execução, as pastas ficarão assim:
+### 2. Organizar estrutura
+
+Após o download, execute o script de organização para garantir que as pastas fiquem na estrutura esperada pelo código:
+
+```bash
+./fscil_lab/organize_datasets.sh
+```
+
+Este script:
+- **PlantVillage**: move `plantvillage dataset/color/` → `color/` (corrige estrutura do Hugging Face)
+- **PlantDoc**: mescla `train/` + `test/` em pastas de classe na raiz de `plantdoc/`
+- **CIFAR-100**: já fica na estrutura correta
+
+### 3. Estrutura final esperada
+
 ```
 fscil_lab/data/raw/
 ├── cifar100/
@@ -263,12 +283,28 @@ fscil_lab/data/raw/
 │       ├── Tomato___Late_blight/
 │       └── ...
 └── plantdoc/
-    ├── Apple___Apple_scab/
-    ├── Tomato___healthy/
+    ├── Apple Scab Leaf/
+    ├── Tomato leaf/
     └── ...
 ```
 
-Para usar o dataset sintético, não é necessário download — selecione "Sintético (teste rápido)" na interface.
+> O dataset **Sintético** não precisa de download — basta selecioná-lo na interface.
+
+### 4. Download manual alternativo
+
+Se os scripts automáticos falharem devido à velocidade de conexão, os links diretos são:
+
+- **CIFAR-100:** `https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz`
+- **PlantVillage:** `https://huggingface.co/datasets/mohanty/PlantVillage` (via `load_dataset("mohanty/PlantVillage", "color")`)
+- **PlantDoc:** `https://github.com/pratikkayal/PlantDoc-Dataset/archive/refs/heads/master.zip`
+
+### 5. Instalar descargadores multi-thread (opcional, acelera CIFAR-100)
+
+```bash
+sudo apt install aria2   # Debian/Ubuntu
+# ou
+sudo pacman -S aria2     # Arch Linux
+```
 
 ---
 
@@ -286,8 +322,7 @@ A interface possui 6 abas. Abaixo o passo a passo de cada uma.
 
 ### 1. Configuração do Experimento
 
-> **Captura de tela:** `docs/screenshots/tab_config.png`  
-> *(Insira aqui uma captura da aba Configuração com os campos preenchidos)*
+![Configuração do Experimento](docs/screenshots/tab_config.png)
 
 Nesta aba você define os parâmetros do experimento FSCIL:
 
@@ -309,8 +344,7 @@ Clique em **"Carregar e Configurar"**. O sistema carregará o dataset, dividirá
 
 ### 2. Execução Incremental (Safras)
 
-> **Captura de tela:** `docs/screenshots/tab_exec.png`  
-> *(Insira aqui uma captura da aba de Execução mostrando classes novas e botão)*
+> **Captura:** `docs/screenshots/tab_exec.png` *(pendiente)*
 
 Após configurar, vá para esta aba para simular a chegada de novas safras:
 
@@ -330,8 +364,7 @@ Continue clicando até que todas as safras sejam processadas.
 
 ### 3. Resultados e Métricas
 
-> **Captura de tela:** `docs/screenshots/tab_results.png`  
-> *(Insira aqui uma captura da aba Resultados com tabela e gráficos)*
+> **Captura:** `docs/screenshots/tab_results.png` *(pendiente)*
 
 Após executar as sessões, visualize:
 
@@ -341,15 +374,15 @@ Após executar as sessões, visualize:
 - **Curva de Acurácia por Sessão:** Gráfico interativo
 - **Matriz de Confusão:** Da última sessão
 - **Tabela de classes** disponíveis na memória
-- **Download CSV:** Precisão por sessão em formato CSV
-- **Dados brutos em JSON:** Para inspeção detalhada
+- **Exportação de resultados:**
+  - **CSV:** Precisão por sessão (para Excel/Google Sheets)
+  - **JSON completo:** Inclui acurácias, PD rate, forgetting, matrizes de confusão e histórico por classe — ideal para análise externa com Python/R/Matlab
 
 ---
 
 ### 4. Espaço de Características
 
-> **Captura de tela:** `docs/screenshots/tab_espaco.png`  
-> *(Insira aqui uma captura da projeção PCA colorida)*
+> **Captura:** `docs/screenshots/tab_espaco.png` *(pendiente)*
 
 Visualização PCA 2D das características extraídas:
 - Cada ponto é uma imagem projetada nos 2 primeiros componentes principais
@@ -361,8 +394,7 @@ Visualização PCA 2D das características extraídas:
 
 ### 5. Diagnóstico de Campo
 
-> **Captura de tela:** `docs/screenshots/tab_demo.png`  
-> *(Insira aqui uma captura com upload de imagem e resultado do diagnóstico)*
+> **Captura:** `docs/screenshots/tab_demo.png` *(pendiente)*
 
 Funcionalidade de inferência para novas imagens:
 
@@ -380,8 +412,7 @@ Funcionalidade de inferência para novas imagens:
 
 ### 6. Guia de Plagas
 
-> **Captura de tela:** `docs/screenshots/tab_guia.png`  
-> *(Insira aqui uma captura da guia de pragas expandida)*
+> **Captura:** `docs/screenshots/tab_guia.png` *(pendiente)*
 
 Base de dados de referência com informações de todas as classes do PlantVillage:
 

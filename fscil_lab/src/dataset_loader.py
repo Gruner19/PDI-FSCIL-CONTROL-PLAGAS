@@ -99,8 +99,7 @@ def _carregar_plantvillage(diretorio_dados: str) -> Dict[str, object]:
         caminho_classe = caminho_raiz / nome_classe
         if not caminho_classe.is_dir():
             continue
-        arquivos = sorted(os.listdir(caminho_classe))
-        for arquivo in arquivos:
+        for arquivo in sorted(os.listdir(caminho_classe)):
             caminho_arquivo = caminho_classe / arquivo
             try:
                 imagem = imread(caminho_arquivo)
@@ -113,6 +112,12 @@ def _carregar_plantvillage(diretorio_dados: str) -> Dict[str, object]:
                 todos_rotulos.append(mapeamento_rotulos[nome_classe])
             except Exception:
                 continue
+    if not todas_imagens:
+        raise ValueError(
+            f"Nenhuma imagem encontrada em {caminho_raiz}. "
+            "Verifique se o dataset PlantVillage foi baixado corretamente "
+            "e se os diretórios de classe contêm imagens."
+        )
     imagens = np.stack(todas_imagens, axis=0)
     rotulos = np.array(todos_rotulos, dtype=np.int64)
     return {
@@ -133,6 +138,43 @@ def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
         )
     from skimage.io import imread
 
+    # Si hay subdiretorios train/ e test/, carregar de ambos
+    if (caminho_raiz / "train").is_dir() and (caminho_raiz / "test").is_dir():
+        todas_imagens = []
+        todos_rotulos = []
+        classes = []
+        mapeamento_rotulos = {}
+        for subset in ("train", "test"):
+            subset_path = caminho_raiz / subset
+            for nome_classe in sorted(os.listdir(subset_path)):
+                if nome_classe not in mapeamento_rotulos:
+                    mapeamento_rotulos[nome_classe] = len(classes)
+                    classes.append(nome_classe)
+                caminho_classe = subset_path / nome_classe
+                if not caminho_classe.is_dir():
+                    continue
+                for arquivo in sorted(os.listdir(caminho_classe)):
+                    try:
+                        imagem = imread(caminho_classe / arquivo)
+                        if imagem.ndim == 3 and imagem.shape[2] >= 3:
+                            imagem = imagem[:, :, :3]
+                        elif imagem.ndim == 2:
+                            from skimage.color import gray2rgb
+                            imagem = gray2rgb(imagem)
+                        todas_imagens.append(imagem)
+                        todos_rotulos.append(mapeamento_rotulos[nome_classe])
+                    except Exception:
+                        continue
+        if not todas_imagens:
+            raise ValueError(
+                f"Nenhuma imagem encontrada em {caminho_raiz}/train ou /test. "
+                "Verifique se o dataset PlantDoc foi baixado corretamente."
+            )
+        imagens = np.stack(todas_imagens, axis=0)
+        rotulos = np.array(todos_rotulos, dtype=np.int64)
+        return {"imagens": imagens, "rotulos": rotulos, "nomes_classes": classes}
+
+    # Fallback: estrutura plana (diretórios de classe na raiz)
     classes = sorted(os.listdir(caminho_raiz))
     mapeamento_rotulos = {nome: indice for indice, nome in enumerate(classes)}
     todas_imagens = []
@@ -141,8 +183,7 @@ def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
         caminho_classe = caminho_raiz / nome_classe
         if not caminho_classe.is_dir():
             continue
-        arquivos = sorted(os.listdir(caminho_classe))
-        for arquivo in arquivos:
+        for arquivo in sorted(os.listdir(caminho_classe)):
             caminho_arquivo = caminho_classe / arquivo
             try:
                 imagem = imread(caminho_arquivo)
@@ -155,6 +196,12 @@ def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
                 todos_rotulos.append(mapeamento_rotulos[nome_classe])
             except Exception:
                 continue
+    if not todas_imagens:
+        raise ValueError(
+            f"Nenhuma imagem encontrada em {caminho_raiz}. "
+            "Verifique se o dataset PlantDoc foi baixado corretamente "
+            "e se os diretórios de classe contêm imagens."
+        )
     imagens = np.stack(todas_imagens, axis=0)
     rotulos = np.array(todos_rotulos, dtype=np.int64)
     return {

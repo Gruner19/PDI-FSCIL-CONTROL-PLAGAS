@@ -52,11 +52,11 @@ EMOJI_TIPO = {"enfermedad": "fungus", "plaga": "bug", "sano": "leaf"}
 NOMBRE_TIPO = {"enfermedad": "Enfermedad", "plaga": "Plaga", "sano": "Sano"}
 
 
-def formatear_nombre_plaga(clave: str) -> str:
+def formatear_nombre_plaga(clave) -> str:
+    if not isinstance(clave, str):
+        clave = str(clave)
     info = GUIA_COMPLETA.get(clave, {})
     if info:
-        tipo = info.get("tipo", "enfermedad")
-        emoji = EMOJI_TIPO.get(tipo, "")
         return f"{info['nombre_comun']} ({info['cultivo']})"
     return clave.replace("___", " - ").replace("_", " ")
 
@@ -71,6 +71,7 @@ def inicializar_estado():
         "dados_brutos": None,
         "resultados": None,
         "indice_ultima_sessao": -1,
+        "config_experimento": {},
     }
     for chave, valor in chaves_padrao.items():
         if chave not in st.session_state:
@@ -223,6 +224,87 @@ def plotar_espaco_caracteristicas(
     return ax
 
 
+# ---------------------------------------------------------------------------
+# Persistencia e comparacion de experimentos
+# ---------------------------------------------------------------------------
+import json as _json
+import time as _time
+DIR_EXPERIMENTOS = Path(__file__).parent / "saved_experiments"
+
+
+def _garantir_dir():
+    DIR_EXPERIMENTOS.mkdir(exist_ok=True)
+
+
+def salvar_experimento(nome: str, config: dict, resultados: dict) -> str:
+    _garantir_dir()
+    timestamp = _time.strftime("%Y-%m-%d %H:%M:%S")
+    dados = {
+        "experiment_name": nome,
+        "timestamp": timestamp,
+        "config": dict(config),
+        "resultados": {
+            "historico_acuracias": list(resultados["historico_acuracias"]),
+            "acuracia_media": float(resultados["acuracia_media"]),
+            "performance_dropping_rate": float(resultados["performance_dropping_rate"]),
+            "esquecimento_medio": float(resultados["esquecimento_medio"]),
+            "historico_matrizes": [
+                m.tolist() if hasattr(m, "tolist") else m
+                for m in resultados["historico_matrizes"]
+            ],
+        },
+    }
+    safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in nome).strip()[:60]
+    fname = f"{_time.strftime('%Y%m%d_%H%M%S')}__{safe}.json"
+    path = DIR_EXPERIMENTOS / fname
+    path.write_text(dicionario_para_json(dados), encoding="utf-8")
+    return str(path)
+
+
+def listar_experimentos_salvos() -> list:
+    _garantir_dir()
+    out = []
+    for arquivo in sorted(DIR_EXPERIMENTOS.glob("*.json"), reverse=True):
+        try:
+            dados = _json.loads(arquivo.read_text(encoding="utf-8"))
+            res = dados["resultados"]
+            out.append({
+                "arquivo": str(arquivo),
+                "nome": dados.get("experiment_name", arquivo.stem),
+                "timestamp": dados.get("timestamp", ""),
+                "config": dados.get("config", {}),
+                "acuracia_media": res["acuracia_media"],
+                "pd": res["performance_dropping_rate"],
+                "forgetting": res["esquecimento_medio"],
+                "n_sessoes": len(res["historico_acuracias"]),
+                "_dados": dados,
+            })
+        except Exception:
+            continue
+    return out
+
+
+def plotar_curvas_comparacion(curvas: list, ax=None):
+    """curvas: list of (label: str, acuracias: list)"""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 5))
+    colormap = plt.cm.tab10
+    for i, (label, vals) in enumerate(curvas):
+        xs = list(range(len(vals)))
+        c = colormap(i / max(len(curvas) - 1, 1))
+        ax.plot(xs, vals, marker="o", linewidth=2, markersize=6, color=c, label=label)
+        ax.fill_between(xs, vals, alpha=0.08, color=c)
+    ax.set_xlabel("Sessão", fontsize=12)
+    ax.set_ylabel("Acurácia", fontsize=12)
+    ax.set_title("Comparación de Acurácias entre Experimentos", fontsize=14, fontweight="bold")
+    ax.set_ylim(0.0, 1.05)
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=9, loc="lower left")
+    plt.tight_layout()
+    return ax
+
+
 def renderizar_aba_configuracao():
     st.header("Configuração do Experimento")
     with st.form("form_configuracao"):
@@ -297,10 +379,7 @@ def renderizar_aba_configuracao():
                 semente,
             )
         nomes_dataset = obter_nomes_dataset(dataset_escolhido)
-        nomes_classes_externos = {}
-        if nomes_dataset:
-            for indice, nome in enumerate(nomes_dataset):
-                nomes_classes_externos[indice] = nome
+        nomes_classes_externos = list(nomes_dataset) if nomes_dataset else None
         gerenciador = GerenciadorDeSessoes(
             dados_brutos=dados_brutos,
             sessoes=sessoes,
@@ -317,6 +396,15 @@ def renderizar_aba_configuracao():
         st.session_state.configurado = True
         st.session_state.resultados = gerenciador.obter_relatorio()
         st.session_state.indice_ultima_sessao = 0
+        st.session_state.config_experimento = {
+            "dataset": dataset_escolhido,
+            "classes_base": numero_classes_base,
+            "classes_por_sessao": classes_por_sessao,
+            "k_shot": k_shot,
+            "estrategia": estrategia,
+            "incluir_hog": incluir_hog,
+            "semente": semente,
+        }
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("Sessão base concluída", f"{len(sessoes['sessao_base'])} classes")
         col_b.metric("Acurácia inicial", f"{resultado_base['metricas']:.3f}")
@@ -478,22 +566,106 @@ def renderizar_aba_resultados():
                 st.pyplot(fig_matriz)
             else:
                 st.info("Matriz de confusión disponible (dimensiones incompatibles).")
-    with st.expander("Datos brutos (JSON)"):
-        st.code(dicionario_para_json(resultados), language="json")
-    with st.expander("Descargar resultados (CSV)"):
-        import pandas as pd
-        datos_csv = {"Sesión": [], "Precisión": []}
-        for indice, valor in enumerate(resultados["historico_acuracias"]):
-            datos_csv["Sesión"].append(indice)
-            datos_csv["Precisión"].append(valor)
-        df_csv = pd.DataFrame(datos_csv)
-        csv_bytes = df_csv.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="Descargar CSV de precisión por sesión",
-            data=csv_bytes,
-            file_name="fscil_resultados_precision.csv",
-            mime="text/csv",
+    # ---- Guardar experimento ----
+    with st.expander("Guardar experimento"):
+        nome_salvar = st.text_input(
+            "Nombre del experimento",
+            value=st.session_state.config_experimento.get("dataset", "experimento"),
+            key="nome_salvar_input",
         )
+        if st.button("Guardar experimento", type="primary"):
+            path = salvar_experimento(
+                nome_salvar,
+                st.session_state.config_experimento,
+                resultados,
+            )
+            st.success(f"Experimento guardado: `{path}`")
+
+    # ---- Comparar experimentos ----
+    with st.expander("Comparar con experimentos guardados"):
+        salvos = listar_experimentos_salvos()
+        if not salvos:
+            st.info("No hay experimentos guardados todavía.")
+        else:
+            opcoes = {
+                f"{e['nome']}  ({e['timestamp']})  |  μ={e['acuracia_media']:.3f}  PD={e['pd']:.3f}  F={e['forgetting']:.3f}": e
+                for e in salvos
+            }
+            selecionados = st.multiselect(
+                "Seleccionar experimentos para comparar",
+                options=list(opcoes.keys()),
+                default=[],
+            )
+            if selecionados and st.button("Mostrar comparación"):
+                curvas = [
+                    (
+                        f"Actual ({st.session_state.config_experimento.get('dataset', '?')})",
+                        resultados["historico_acuracias"],
+                    )
+                ]
+                dados_tabela = [
+                    {
+                        "Experimento": "Actual",
+                        "Dataset": st.session_state.config_experimento.get("dataset", "?"),
+                        "Acurácia media": f"{resultados['acuracia_media']:.4f}",
+                        "PD Rate": f"{resultados['performance_dropping_rate']:.4f}",
+                        "Esq. medio": f"{resultados['esquecimento_medio']:.4f}",
+                        "Sesiones": len(resultados["historico_acuracias"]),
+                    }
+                ]
+                for chave in selecionados:
+                    e = opcoes[chave]
+                    curvas.append((e["nome"], e["_dados"]["resultados"]["historico_acuracias"]))
+                    dados_tabela.append({
+                        "Experimento": e["nome"],
+                        "Dataset": e["config"].get("dataset", "?"),
+                        "Acurácia media": f"{e['acuracia_media']:.4f}",
+                        "PD Rate": f"{e['pd']:.4f}",
+                        "Esq. medio": f"{e['forgetting']:.4f}",
+                        "Sesiones": e["n_sessoes"],
+                    })
+                st.subheader("Curvas comparadas")
+                fig_comp, ax_comp = plt.subplots(figsize=(10, 5))
+                plotar_curvas_comparacion(curvas, ax=ax_comp)
+                st.pyplot(fig_comp)
+                st.subheader("Tabla comparativa")
+                import pandas as pd
+                st.dataframe(
+                    pd.DataFrame(dados_tabela),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    with st.expander("Exportar resultados"):
+        import pandas as pd
+        col_exp1, col_exp2 = st.columns(2)
+        with col_exp1:
+            datos_csv = {"Sesión": [], "Precisión": []}
+            for indice, valor in enumerate(resultados["historico_acuracias"]):
+                datos_csv["Sesión"].append(indice)
+                datos_csv["Precisión"].append(valor)
+            df_csv = pd.DataFrame(datos_csv)
+            csv_bytes = df_csv.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="CSV (precisión por sesión)",
+                data=csv_bytes,
+                file_name="fscil_resultados_precision.csv",
+                mime="text/csv",
+            )
+        with col_exp2:
+            resultados_json = dict(resultados)
+            resultados_json["historico_matrizes"] = [
+                m.tolist() for m in resultados_json["historico_matrizes"]
+            ]
+            if hasattr(resultados_json.get("historico_por_classe"), "tolist"):
+                resultados_json["historico_por_classe"] = resultados_json["historico_por_classe"].tolist()
+            json_bytes = dicionario_para_json(resultados_json).encode("utf-8")
+            st.download_button(
+                label="JSON (completo)",
+                data=json_bytes,
+                file_name="fscil_resultados_completos.json",
+                mime="application/json",
+            )
 
 
 def renderizar_aba_espaco():
