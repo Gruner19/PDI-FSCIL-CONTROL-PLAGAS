@@ -1,8 +1,6 @@
 import numpy as np
 import os
 import pickle
-import tarfile
-import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -26,14 +24,14 @@ def gerar_dataset_sintetico(
 
 
 def carregar_dataset_bruto(
-    nome_dataset: str, diretorio_dados: str, baixar_automaticamente: bool = False
+    nome_dataset: str, diretorio_dados: str
 ) -> Dict[str, object]:
     if nome_dataset.lower() == "cifar100":
         return _carregar_cifar100(diretorio_dados)
     elif nome_dataset.lower() == "plantvillage":
-        return _carregar_plantvillage(diretorio_dados, baixar_automaticamente)
+        return _carregar_plantvillage(diretorio_dados)
     elif nome_dataset.lower() == "plantdoc":
-        return _carregar_plantdoc(diretorio_dados, baixar_automaticamente)
+        return _carregar_plantdoc(diretorio_dados)
     elif nome_dataset.lower() == "sintetico":
         return gerar_dataset_sintetico(semente_aleatoria=42)
     else:
@@ -43,14 +41,22 @@ def carregar_dataset_bruto(
 
 
 def _carregar_cifar100(diretorio_dados: str) -> Dict[str, object]:
-    """Carrega CIFAR-100 sem dependência externa (download direto do dataset oficial)."""
+    """Carrega CIFAR-100 de arquivos locais."""
     caminho_cache = Path(diretorio_dados) / "cifar100"
-    caminho_cache.mkdir(parents=True, exist_ok=True)
     arquivo_metadados = caminho_cache / "meta"
     arquivo_treino = caminho_cache / "train"
     arquivo_teste = caminho_cache / "test"
-    if not (arquivo_treino.exists() and arquivo_teste.exists()):
-        _baixar_cifar100(caminho_cache)
+    if not (arquivo_treino.exists() and arquivo_teste.exists() and arquivo_metadados.exists()):
+        raise FileNotFoundError(
+            f"Arquivos CIFAR-100 não encontrados em {caminho_cache}. "
+            "Coloque os arquivos 'meta', 'train' e 'test' (extraídos do CIFAR-100) em:\n"
+            f"  {caminho_cache}/\n\n"
+            "Passos:\n"
+            "  1. Baixe de: https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz\n"
+            "  2. Extraia o .tar.gz\n"
+            "  3. Copie 'meta', 'train' e 'test' de cifar-100-python/ para:\n"
+            f"     {caminho_cache}/\n"
+        )
     with open(arquivo_treino, "rb") as arquivo:
             dados_treino = pickle.load(arquivo, encoding="bytes")
     with open(arquivo_teste, "rb") as arquivo:
@@ -71,52 +77,18 @@ def _carregar_cifar100(diretorio_dados: str) -> Dict[str, object]:
     }
 
 
-def _baixar_cifar100(caminho_cache: Path) -> None:
-    """Download e extração do dataset CIFAR-100 do site oficial."""
-    url = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
-    arquivo_tar = caminho_cache / "cifar-100-python.tar.gz"
-    print(f"Baixando CIFAR-100 de {url}...")
-    classe_abridor = urllib.request.build_opener(
-        urllib.request.HTTPRedirectHandler(),
-        urllib.request.HTTPSHandler(),
-    )
-    urllib.request.install_opener(classe_abridor)
-    urllib.request.urlretrieve(url, arquivo_tar)
-    print("Extraindo arquivos...")
-    with tarfile.open(arquivo_tar, "r:gz") as tar:
-        for membro in tar.getmembers():
-            nome = os.path.basename(membro.name)
-            if nome in ("meta", "train", "test"):
-                tar.extract(membro, path=caminho_cache)
-                caminho_origem = caminho_cache / membro.name
-                caminho_destino = caminho_cache / nome
-                if caminho_origem != caminho_destino:
-                    if caminho_destino.exists():
-                        caminho_destino.unlink()
-                    os.rename(str(caminho_origem), str(caminho_destino))
-    arquivo_tar.unlink()
-    diretorio_extraido = caminho_cache / "cifar-100-python"
-    if diretorio_extraido.exists():
-        import shutil
-        shutil.rmtree(diretorio_extraido)
-    print("CIFAR-100 pronto.")
-
-
-def _carregar_plantvillage(diretorio_dados: str, baixar_automaticamente: bool = False) -> Dict[str, object]:
+def _carregar_plantvillage(diretorio_dados: str) -> Dict[str, object]:
     caminho_raiz = Path(diretorio_dados) / "plantvillage" / "color"
     if not caminho_raiz.exists():
-        if baixar_automaticamente:
-            _baixar_plantvillage(caminho_raiz.parent)
-        else:
-            raise FileNotFoundError(
-                f"Diretório PlantVillage não encontrado em {caminho_raiz}. "
-                "Passe baixar_automaticamente=True ou baixe manualmente de:\n"
-                "  https://github.com/spMohanty/PlantVillage-Dataset/raw/master/raw/color.zip\n"
-                "e extraia para data/raw/plantvillage/ de modo que a estrutura seja:\n"
-                "  plantvillage/color/Apple___Apple_scab/\n"
-                "  plantvillage/color/Tomato___Late_blight/\n"
-                "  ..."
-            )
+        raise FileNotFoundError(
+            f"Diretório PlantVillage não encontrado em {caminho_raiz}. "
+            "Baixe manualmente de:\n"
+            "  https://github.com/spMohanty/PlantVillage-Dataset/raw/master/raw/color.zip\n"
+            "e extraia para data/raw/plantvillage/ de modo que a estrutura seja:\n"
+            "  data/raw/plantvillage/color/Apple___Apple_scab/\n"
+            "  data/raw/plantvillage/color/Tomato___Late_blight/\n"
+            "  ..."
+        )
     from skimage.io import imread
 
     classes = sorted(os.listdir(caminho_raiz))
@@ -150,109 +122,15 @@ def _carregar_plantvillage(diretorio_dados: str, baixar_automaticamente: bool = 
     }
 
 
-def _baixar_plantvillage(diretorio_destino: Path) -> None:
-    """Download automático do PlantVillage. Tenta GitHub LFS, depois HuggingFace, depois fallback manual."""
-    import zipfile
-    import shutil
-
-    def _extrair_zip(caminho_zip: Path) -> None:
-        with zipfile.ZipFile(caminho_zip, "r") as zf:
-            zf.extractall(path=diretorio_destino)
-        caminho_zip.unlink()
-
-    def _tentar_github_lfs() -> bool:
-        url_zip = "https://raw.githubusercontent.com/spMohanty/PlantVillage-Dataset/master/raw/color.zip"
-        arquivo_zip = diretorio_destino / "color.zip"
-        print(f"Tentando GitHub LFS: {url_zip}")
-        classe_abridor = urllib.request.build_opener(
-            urllib.request.HTTPRedirectHandler(),
-            urllib.request.HTTPSHandler(),
-        )
-        urllib.request.install_opener(classe_abridor)
-        try:
-            urllib.request.urlretrieve(url_zip, arquivo_zip)
-            _extrair_zip(arquivo_zip)
-            return True
-        except Exception as erro:
-            if arquivo_zip.exists():
-                arquivo_zip.unlink()
-            print(f"GitHub LFS falhou: {erro}")
-            return False
-
-    def _tentar_kagglehub() -> bool:
-        try:
-            import kagglehub
-            print("Tentando kagglehub...")
-            caminho = kagglehub.dataset_download("abdallahalidev/plantvillage-dataset")
-            caminho_origem = Path(caminho)
-            for item in caminho_origem.iterdir():
-                destino = diretorio_destino / item.name
-                if item.is_dir():
-                    shutil.copytree(item, destino, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(item, destino)
-            return True
-        except ImportError:
-            return False
-        except Exception as erro:
-            print(f"kagglehub falhou: {erro}")
-            return False
-
-    def _tentar_huggingface() -> bool:
-        try:
-            from datasets import load_dataset
-            print("Tentando HuggingFace Datasets...")
-            dataset = load_dataset("aryamanhm/PlantVillage", trust_remote_code=True)
-            diretorio_imagens = diretorio_destino / "color"
-            diretorio_imagens.mkdir(parents=True, exist_ok=True)
-            for exemplo in dataset["train"]:
-                imagem = exemplo["image"]
-                classe = exemplo["label"]
-                rotulo = dataset["train"].features["label"].int2str(classe)
-                pasta_classe = diretorio_imagens / rotulo
-                pasta_classe.mkdir(parents=True, exist_ok=True)
-                caminho_imagem = pasta_classe / f"{exemplo['image'].filename}"
-                imagem.save(caminho_imagem)
-            return True
-        except ImportError:
-            return False
-        except Exception as erro:
-            print(f"HuggingFace falhou: {erro}")
-            return False
-
-    diretorio_destino.mkdir(parents=True, exist_ok=True)
-    if _tentar_github_lfs():
-        print("PlantVillage baixado via GitHub LFS.")
-        return
-    if _tentar_kagglehub():
-        print("PlantVillage baixado via KaggleHub.")
-        return
-    if _tentar_huggingface():
-        print("PlantVillage baixado via HuggingFace.")
-        return
-    raise RuntimeError(
-        "Não foi possível baixar o PlantVillage automaticamente. "
-        "Instale uma das bibliotecas auxiliares:\n"
-        "  pip install kagglehub\n"
-        "  pip install datasets\n"
-        "Ou baixe manualmente de:\n"
-        "  https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset\n"
-        "e extraia para data/raw/plantvillage/color/"
-    )
-
-
-def _carregar_plantdoc(diretorio_dados: str, baixar_automaticamente: bool = False) -> Dict[str, object]:
+def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
     caminho_raiz = Path(diretorio_dados) / "plantdoc"
     if not caminho_raiz.exists():
-        if baixar_automaticamente:
-            _baixar_plantdoc(caminho_raiz)
-        else:
-            raise FileNotFoundError(
-                f"Diretório PlantDoc não encontrado em {caminho_raiz}. "
-                "Passe baixar_automaticamente=True ou baixe manualmente de:\n"
-                "  https://github.com/pratikkayal/PlantDoc-Dataset/archive/refs/heads/master.zip\n"
-                "e extraia para data/raw/plantdoc/"
-            )
+        raise FileNotFoundError(
+            f"Diretório PlantDoc não encontrado em {caminho_raiz}. "
+            "Baixe manualmente de:\n"
+            "  https://github.com/pratikkayal/PlantDoc-Dataset/archive/refs/heads/master.zip\n"
+            "e extraia para data/raw/plantdoc/"
+        )
     from skimage.io import imread
 
     classes = sorted(os.listdir(caminho_raiz))
@@ -284,71 +162,6 @@ def _carregar_plantdoc(diretorio_dados: str, baixar_automaticamente: bool = Fals
         "rotulos": rotulos,
         "nomes_classes": classes,
     }
-
-
-def _baixar_plantdoc(diretorio_destino: Path) -> None:
-    """Download automático do PlantDoc do GitHub oficial."""
-    import zipfile
-    import shutil
-
-    def _tentar_github_zip() -> bool:
-        url_zip = "https://github.com/pratikkayal/PlantDoc-Dataset/archive/refs/heads/master.zip"
-        arquivo_zip = diretorio_destino.parent / "plantdoc-master.zip"
-        print(f"Tentando GitHub: {url_zip}")
-        classe_abridor = urllib.request.build_opener(
-            urllib.request.HTTPRedirectHandler(),
-            urllib.request.HTTPSHandler(),
-        )
-        urllib.request.install_opener(classe_abridor)
-        try:
-            urllib.request.urlretrieve(url_zip, arquivo_zip)
-            with zipfile.ZipFile(arquivo_zip, "r") as zf:
-                zf.extractall(path=diretorio_destino.parent)
-            arquivo_zip.unlink()
-            pasta_extraida = diretorio_destino.parent / "PlantDoc-Dataset-master"
-            if pasta_extraida.exists() and not diretorio_destino.exists():
-                shutil.move(str(pasta_extraida), str(diretorio_destino))
-            return True
-        except Exception as erro:
-            if arquivo_zip.exists():
-                arquivo_zip.unlink()
-            print(f"GitHub falhou: {erro}")
-            return False
-
-    def _tentar_kagglehub() -> bool:
-        try:
-            import kagglehub
-            print("Tentando kagglehub...")
-            caminho = kagglehub.dataset_download("noulam/plantdoc")
-            caminho_origem = Path(caminho)
-            diretorio_destino.mkdir(parents=True, exist_ok=True)
-            for item in caminho_origem.iterdir():
-                destino = diretorio_destino / item.name
-                if item.is_dir():
-                    shutil.copytree(item, destino, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(item, destino)
-            return True
-        except ImportError:
-            return False
-        except Exception as erro:
-            print(f"kagglehub falhou: {erro}")
-            return False
-
-    diretorio_destino.mkdir(parents=True, exist_ok=True)
-    if _tentar_github_zip():
-        print("PlantDoc baixado via GitHub.")
-        return
-    if _tentar_kagglehub():
-        print("PlantDoc baixado via KaggleHub.")
-        return
-    raise RuntimeError(
-        "Não foi possível baixar o PlantDoc automaticamente.\n"
-        "  Instale: pip install kagglehub\n"
-        "Ou baixe manualmente de:\n"
-        "  https://www.kaggle.com/datasets/noulam/plantdoc\n"
-        "e extraia para data/raw/plantdoc/"
-    )
 
 
 def dividir_em_sessoes(

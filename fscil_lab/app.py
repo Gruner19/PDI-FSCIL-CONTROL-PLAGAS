@@ -16,6 +16,7 @@ sys.path.insert(0, str(caminho_raiz))
 from src.dataset_loader import (
     carregar_dataset_bruto,
     dividir_em_sessoes,
+    preparar_dados_sessao as _preparar_dados_sessao,
 )
 from src.preprocessing import pipeline_completo_preprocessamento
 from src.feature_extraction import extrair_todas_caracteristicas
@@ -26,7 +27,6 @@ from src.metrics import (
     montar_matriz_confusao,
     gerar_relatorio_sessoes,
 )
-from src.dataset_loader import preparar_dados_sessao as _preparar_dados_sessao
 from src.utils import dicionario_para_json
 from src.pest_guide import (
     GUIA_COMPLETA,
@@ -231,7 +231,8 @@ def renderizar_aba_configuracao():
             dataset_escolhido = st.selectbox(
                 "Dataset",
                 ["Sintético (teste rápido)", "CIFAR-100", "PlantVillage", "PlantDoc"],
-                help="Sintético gera dados aleatórios para testar o pipeline sem download.",
+                help="Sintético gera dados aleatórios para testar o pipeline. "
+                     "CIFAR-100, PlantVillage e PlantDoc devem estar baixados localmente.",
             )
             nome_dataset = (
                 "sintetico"
@@ -273,19 +274,14 @@ def renderizar_aba_configuracao():
             incluir_hog = st.checkbox("Incluir descritores HOG", value=False)
         st.markdown("---")
         st.markdown(
-            "**Nota:** Dataset Sintético gera dados aleatórios localmente (mais rápido). "
-            "CIFAR-100 requer download de ~160 MB na primeira execução. "
-            "PlantVillage (~1.2 GB) e PlantDoc (~600 MB) também podem baixar automaticamente "
-            "do GitHub oficial ao clicar em 'Carregar'."
+            "**Importante:** Los datasets CIFAR-100, PlantVillage y PlantDoc deben estar "
+            "descargados manualmente y colocados en el directorio de datos antes de cargarlos."
         )
-        botao_configurar = st.form_submit_button("Carregar e Configurar (com download automático)", type="primary")
+        botao_configurar = st.form_submit_button("Carregar e Configurar", type="primary")
     if botao_configurar:
         with st.spinner("Carregando dataset..."):
             try:
-                baixar_auto = nome_dataset in ("plantvillage", "plantdoc")
-                dados_brutos = carregar_dataset_bruto(
-                    nome_dataset, pasta_dados, baixar_automaticamente=baixar_auto
-                )
+                dados_brutos = carregar_dataset_bruto(nome_dataset, pasta_dados)
                 st.success(
                     f"Dataset carregado: {dados_brutos['imagens'].shape[0]} imagens, "
                     f"{len(np.unique(dados_brutos['rotulos']))} classes."
