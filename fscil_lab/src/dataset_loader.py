@@ -5,14 +5,42 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+MAX_IMAGENS_PADRAO = 1000
+
+
+def _amostrar_indices(
+    total: int, tamanho_amostra: int, semente: int
+) -> np.ndarray:
+    """Amostra índices aleatórios sem reposição."""
+    if total <= tamanho_amostra:
+        return np.arange(total)
+    gerador = np.random.default_rng(semente)
+    return gerador.choice(total, size=tamanho_amostra, replace=False)
+
+
+def _carregar_imagem_por_caminho(caminho: Path):
+    """Carrega uma única imagem de um caminho, normalizando para RGB."""
+    from skimage.io import imread
+    from skimage.color import gray2rgb
+    imagem = imread(caminho)
+    if imagem.ndim == 3 and imagem.shape[2] >= 3:
+        return imagem[:, :, :3]
+    elif imagem.ndim == 2:
+        return gray2rgb(imagem)
+    return imagem
+
+
 def gerar_dataset_sintetico(
     quantidade_imagens: int = 5000,
     numero_classes: int = 50,
     altura: int = 64,
     largura: int = 64,
     semente_aleatoria: int = 42,
+    max_imagens: Optional[int] = None,
 ) -> Dict[str, object]:
     """Gera dataset sintético para testes, sem necessidade de download."""
+    if max_imagens is not None and max_imagens < quantidade_imagens:
+        quantidade_imagens = max_imagens
     gerador = np.random.default_rng(semente_aleatoria)
     imagens = gerador.integers(0, 256, size=(quantidade_imagens, altura, largura, 3), dtype=np.uint8)
     for indice in range(quantidade_imagens):
@@ -24,20 +52,29 @@ def gerar_dataset_sintetico(
 
 
 def carregar_dataset_bruto(
-    nome_dataset: str, diretorio_dados: str
+    nome_dataset: str,
+    diretorio_dados: str,
+    max_imagens: Optional[int] = None,
+    semente: int = 42,
 ) -> Dict[str, object]:
     if nome_dataset.lower() == "cifar100":
-        return _carregar_cifar100(diretorio_dados)
+        dados = _carregar_cifar100(diretorio_dados)
     elif nome_dataset.lower() == "plantvillage":
-        return _carregar_plantvillage(diretorio_dados)
+        dados = _carregar_plantvillage(diretorio_dados, max_imagens=max_imagens, semente=semente)
     elif nome_dataset.lower() == "plantdoc":
-        return _carregar_plantdoc(diretorio_dados)
+        dados = _carregar_plantdoc(diretorio_dados, max_imagens=max_imagens, semente=semente)
     elif nome_dataset.lower() == "sintetico":
-        return gerar_dataset_sintetico(semente_aleatoria=42)
+        dados = gerar_dataset_sintetico(semente_aleatoria=semente, max_imagens=max_imagens)
     else:
         raise ValueError(
             f"Dataset '{nome_dataset}' não suportado. Opções: cifar100, sintetico, plantvillage, plantdoc."
         )
+    # Amostragem posterior para datasets já carregados (CIFAR-100, sintético)
+    if max_imagens is not None and dados["imagens"].shape[0] > max_imagens:
+        indices = _amostrar_indices(dados["imagens"].shape[0], max_imagens, semente)
+        dados["imagens"] = dados["imagens"][indices]
+        dados["rotulos"] = dados["rotulos"][indices]
+    return dados
 
 
 def _carregar_cifar100(diretorio_dados: str) -> Dict[str, object]:
@@ -77,7 +114,63 @@ def _carregar_cifar100(diretorio_dados: str) -> Dict[str, object]:
     }
 
 
-def _carregar_plantvillage(diretorio_dados: str) -> Dict[str, object]:
+def _coletar_caminhos(
+    caminho_raiz: Path,
+) -> Tuple[List[Path], np.ndarray, List[str]]:
+    """Percorre diretórios de classe e coleta caminhos sem carregar imagens.
+    
+    Returns:
+        (lista_de_caminhos, array_de_rótulos, lista_de_nomes_de_classes)
+    """
+    classes = sorted(
+        nome for nome in os.listdir(caminho_raiz)
+        if (caminho_raiz / nome).is_dir()
+    )
+    mapeamento_rotulos = {nome: indice for indice, nome in enumerate(classes)}
+    todos_caminhos = []
+    todos_rotulos = []
+    for nome_classe in classes:
+        caminho_classe = caminho_raiz / nome_classe
+        for arquivo in sorted(os.listdir(caminho_classe)):
+            todos_caminhos.append(caminho_classe / arquivo)
+            todos_rotulos.append(mapeamento_rotulos[nome_classe])
+    return todos_caminhos, np.array(todos_rotulos, dtype=np.int64), classes
+
+
+def _carregar_imagens_de_caminhos(
+    caminhos: List[Path], rotulos: np.ndarray, classes: List[str],
+) -> Dict[str, object]:
+    """Carrega imagens de uma lista de caminhos."""
+    from skimage.io import imread
+    from skimage.color import gray2rgb
+
+    imagens = []
+    rotulos_filtrados = []
+    for caminho, rotulo in zip(caminhos, rotulos):
+        try:
+            imagem = imread(caminho)
+            if imagem.ndim == 3 and imagem.shape[2] >= 3:
+                imagem = imagem[:, :, :3]
+            elif imagem.ndim == 2:
+                imagem = gray2rgb(imagem)
+            imagens.append(imagem)
+            rotulos_filtrados.append(rotulo)
+        except Exception:
+            continue
+    if not imagens:
+        raise ValueError(f"Nenhuma imagem pôde ser carregada de {len(caminhos)} caminhos.")
+    return {
+        "imagens": np.stack(imagens, axis=0),
+        "rotulos": np.array(rotulos_filtrados, dtype=np.int64),
+        "nomes_classes": classes,
+    }
+
+
+def _carregar_plantvillage(
+    diretorio_dados: str,
+    max_imagens: Optional[int] = None,
+    semente: int = 42,
+) -> Dict[str, object]:
     caminho_raiz = Path(diretorio_dados) / "plantvillage" / "color"
     if not caminho_raiz.exists():
         raise FileNotFoundError(
@@ -89,45 +182,63 @@ def _carregar_plantvillage(diretorio_dados: str) -> Dict[str, object]:
             "  data/raw/plantvillage/color/Tomato___Late_blight/\n"
             "  ..."
         )
-    from skimage.io import imread
 
-    classes = sorted(os.listdir(caminho_raiz))
+    # 1. Coletar caminhos sem carregar imagens
+    todos_caminhos, todos_rotulos, classes = _coletar_caminhos(caminho_raiz)
+    total_caminhos = len(todos_caminhos)
+
+    # 2. Amostrar caminhos ANTES de carregar (otimização de memória)
+    if max_imagens is not None and total_caminhos > max_imagens:
+        indices = _amostrar_indices(total_caminhos, max_imagens, semente)
+        todos_caminhos = [todos_caminhos[i] for i in indices]
+        todos_rotulos = todos_rotulos[indices]
+
+    # 3. Carregar apenas os caminhos selecionados
+    return _carregar_imagens_de_caminhos(todos_caminhos, todos_rotulos, classes)
+
+
+def _coletar_caminhos_plantdoc(caminho_raiz: Path) -> Tuple[List[Path], np.ndarray, List[str]]:
+    """Coleta caminhos do PlantDoc (train/ + test/ ou raiz plana)."""
+    if (caminho_raiz / "train").is_dir() and (caminho_raiz / "test").is_dir():
+        classes = []
+        mapeamento_rotulos = {}
+        todos_caminhos = []
+        todos_rotulos = []
+        for subset in ("train", "test"):
+            subset_path = caminho_raiz / subset
+            for nome_classe in sorted(
+                n for n in os.listdir(subset_path) if (subset_path / n).is_dir()
+            ):
+                if nome_classe not in mapeamento_rotulos:
+                    mapeamento_rotulos[nome_classe] = len(classes)
+                    classes.append(nome_classe)
+                caminho_classe = subset_path / nome_classe
+                for arquivo in sorted(os.listdir(caminho_classe)):
+                    todos_caminhos.append(caminho_classe / arquivo)
+                    todos_rotulos.append(mapeamento_rotulos[nome_classe])
+        return todos_caminhos, np.array(todos_rotulos, dtype=np.int64), classes
+
+    # Fallback: estrutura plana
+    classes = sorted(
+        nome for nome in os.listdir(caminho_raiz)
+        if (caminho_raiz / nome).is_dir()
+    )
     mapeamento_rotulos = {nome: indice for indice, nome in enumerate(classes)}
-    todas_imagens = []
+    todos_caminhos = []
     todos_rotulos = []
     for nome_classe in classes:
         caminho_classe = caminho_raiz / nome_classe
-        if not caminho_classe.is_dir():
-            continue
         for arquivo in sorted(os.listdir(caminho_classe)):
-            caminho_arquivo = caminho_classe / arquivo
-            try:
-                imagem = imread(caminho_arquivo)
-                if imagem.ndim == 3 and imagem.shape[2] >= 3:
-                    imagem = imagem[:, :, :3]
-                elif imagem.ndim == 2:
-                    from skimage.color import gray2rgb
-                    imagem = gray2rgb(imagem)
-                todas_imagens.append(imagem)
-                todos_rotulos.append(mapeamento_rotulos[nome_classe])
-            except Exception:
-                continue
-    if not todas_imagens:
-        raise ValueError(
-            f"Nenhuma imagem encontrada em {caminho_raiz}. "
-            "Verifique se o dataset PlantVillage foi baixado corretamente "
-            "e se os diretórios de classe contêm imagens."
-        )
-    imagens = np.stack(todas_imagens, axis=0)
-    rotulos = np.array(todos_rotulos, dtype=np.int64)
-    return {
-        "imagens": imagens,
-        "rotulos": rotulos,
-        "nomes_classes": classes,
-    }
+            todos_caminhos.append(caminho_classe / arquivo)
+            todos_rotulos.append(mapeamento_rotulos[nome_classe])
+    return todos_caminhos, np.array(todos_rotulos, dtype=np.int64), classes
 
 
-def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
+def _carregar_plantdoc(
+    diretorio_dados: str,
+    max_imagens: Optional[int] = None,
+    semente: int = 42,
+) -> Dict[str, object]:
     caminho_raiz = Path(diretorio_dados) / "plantdoc"
     if not caminho_raiz.exists():
         raise FileNotFoundError(
@@ -136,79 +247,19 @@ def _carregar_plantdoc(diretorio_dados: str) -> Dict[str, object]:
             "  https://github.com/pratikkayal/PlantDoc-Dataset/archive/refs/heads/master.zip\n"
             "e extraia para data/raw/plantdoc/"
         )
-    from skimage.io import imread
 
-    # Si hay subdiretorios train/ e test/, carregar de ambos
-    if (caminho_raiz / "train").is_dir() and (caminho_raiz / "test").is_dir():
-        todas_imagens = []
-        todos_rotulos = []
-        classes = []
-        mapeamento_rotulos = {}
-        for subset in ("train", "test"):
-            subset_path = caminho_raiz / subset
-            for nome_classe in sorted(os.listdir(subset_path)):
-                if nome_classe not in mapeamento_rotulos:
-                    mapeamento_rotulos[nome_classe] = len(classes)
-                    classes.append(nome_classe)
-                caminho_classe = subset_path / nome_classe
-                if not caminho_classe.is_dir():
-                    continue
-                for arquivo in sorted(os.listdir(caminho_classe)):
-                    try:
-                        imagem = imread(caminho_classe / arquivo)
-                        if imagem.ndim == 3 and imagem.shape[2] >= 3:
-                            imagem = imagem[:, :, :3]
-                        elif imagem.ndim == 2:
-                            from skimage.color import gray2rgb
-                            imagem = gray2rgb(imagem)
-                        todas_imagens.append(imagem)
-                        todos_rotulos.append(mapeamento_rotulos[nome_classe])
-                    except Exception:
-                        continue
-        if not todas_imagens:
-            raise ValueError(
-                f"Nenhuma imagem encontrada em {caminho_raiz}/train ou /test. "
-                "Verifique se o dataset PlantDoc foi baixado corretamente."
-            )
-        imagens = np.stack(todas_imagens, axis=0)
-        rotulos = np.array(todos_rotulos, dtype=np.int64)
-        return {"imagens": imagens, "rotulos": rotulos, "nomes_classes": classes}
+    # 1. Coletar caminhos sem carregar imagens
+    todos_caminhos, todos_rotulos, classes = _coletar_caminhos_plantdoc(caminho_raiz)
+    total_caminhos = len(todos_caminhos)
 
-    # Fallback: estrutura plana (diretórios de classe na raiz)
-    classes = sorted(os.listdir(caminho_raiz))
-    mapeamento_rotulos = {nome: indice for indice, nome in enumerate(classes)}
-    todas_imagens = []
-    todos_rotulos = []
-    for nome_classe in classes:
-        caminho_classe = caminho_raiz / nome_classe
-        if not caminho_classe.is_dir():
-            continue
-        for arquivo in sorted(os.listdir(caminho_classe)):
-            caminho_arquivo = caminho_classe / arquivo
-            try:
-                imagem = imread(caminho_arquivo)
-                if imagem.ndim == 3 and imagem.shape[2] >= 3:
-                    imagem = imagem[:, :, :3]
-                elif imagem.ndim == 2:
-                    from skimage.color import gray2rgb
-                    imagem = gray2rgb(imagem)
-                todas_imagens.append(imagem)
-                todos_rotulos.append(mapeamento_rotulos[nome_classe])
-            except Exception:
-                continue
-    if not todas_imagens:
-        raise ValueError(
-            f"Nenhuma imagem encontrada em {caminho_raiz}. "
-            "Verifique se o dataset PlantDoc foi baixado corretamente "
-            "e se os diretórios de classe contêm imagens."
-        )
-    imagens = np.stack(todas_imagens, axis=0)
-    rotulos = np.array(todos_rotulos, dtype=np.int64)
-    return {
-        "imagens": imagens,
-        "rotulos": rotulos,
-        "nomes_classes": classes,
-    }
+    # 2. Amostrar caminhos ANTES de carregar
+    if max_imagens is not None and total_caminhos > max_imagens:
+        indices = _amostrar_indices(total_caminhos, max_imagens, semente)
+        todos_caminhos = [todos_caminhos[i] for i in indices]
+        todos_rotulos = todos_rotulos[indices]
+
+    # 3. Carregar apenas os caminhos selecionados
+    return _carregar_imagens_de_caminhos(todos_caminhos, todos_rotulos, classes)
 
 
 def dividir_em_sessoes(

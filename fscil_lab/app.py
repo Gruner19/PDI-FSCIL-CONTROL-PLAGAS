@@ -47,6 +47,27 @@ st.sidebar.title("FSCIL-Lab")
 st.sidebar.markdown("Diagnóstico incremental de doenças foliares")
 st.sidebar.markdown("---")
 
+with st.sidebar.expander("Conexión Colab (ngrok)", expanded=False):
+    colab_api_url = st.text_input(
+        "URL ngrok de la API",
+        placeholder="https://xxxx.ngrok.io",
+        key="colab_api_url",
+        help="Ejecuta colab_api.py en Colab y pega aquí la URL que aparece.",
+    )
+    if st.session_state.get("colab_api_url"):
+        if st.button("Probar conexión", key="test_colab"):
+            try:
+                import requests as _requests
+                r = _requests.get(f"{st.session_state.colab_api_url}/health", timeout=5)
+                if r.json().get("status") == "ok":
+                    st.success("Conectado a Colab")
+                else:
+                    st.error("Respuesta inesperada")
+            except Exception as e:
+                st.error(f"No se pudo conectar: {e}")
+
+st.sidebar.markdown("---")
+
 
 EMOJI_TIPO = {"enfermedad": "fungus", "plaga": "bug", "sano": "leaf"}
 NOMBRE_TIPO = {"enfermedad": "Enfermedad", "plaga": "Plaga", "sano": "Sano"}
@@ -305,6 +326,115 @@ def plotar_curvas_comparacion(curvas: list, ax=None):
     return ax
 
 
+def _reconstruir_desde_estado_colab(data, incluir_hog, semente, dataset_escolhido):
+    """Reconstruye session_state a partir de la respuesta JSON del API de Colab."""
+    res = data.get("resultados") or {}
+    if res.get("historico_acuracias"):
+        st.session_state.resultados = {
+            "historico_acuracias": res["historico_acuracias"],
+            "acuracia_media": res.get("acuracia_media", 0.0),
+            "performance_dropping_rate": res.get("performance_dropping_rate", 0.0),
+            "esquecimento_medio": res.get("esquecimento_medio", 0.0),
+            "historico_matrizes": [np.array(m) for m in (res.get("historico_matrizes") or [])],
+        }
+        st.session_state["indice_ultima_sessao"] = len(res["historico_acuracias"]) - 1
+    st.session_state.config_experimento = dataset_escolhido
+    st.session_state.configurado = True
+    st.session_state["importado_desde_colab"] = True
+
+    memoria_data = data.get("memoria")
+    escalonador_data = data.get("escalonador")
+    from src.prototype_memory import MemoriaDePrototipos
+    from sklearn.preprocessing import StandardScaler
+    mem = MemoriaDePrototipos()
+    if memoria_data and memoria_data.get("prototipos") is not None:
+        mem.prototipos = np.array(memoria_data["prototipos"])
+        mem.mapeamento_classe_para_indice = {int(k): v for k, v in memoria_data.get("mapeamento_classe_para_indice", {}).items()}
+        mem.mapeamento_indice_para_classe = {int(k): v for k, v in memoria_data.get("mapeamento_indice_para_classe", {}).items()}
+        mem.nomes_classes = {int(k): v for k, v in memoria_data.get("nomes_classes", {}).items()}
+        mem.historico_contagem_amostras = {int(k): v for k, v in memoria_data.get("historico_contagem_amostras", {}).items()}
+    scaler = None
+    if escalonador_data:
+        scaler = StandardScaler()
+        for attr in ("mean_", "scale_", "var_", "n_features_in_", "n_samples_seen_"):
+            val = escalonador_data.get(attr)
+            if val is not None:
+                setattr(scaler, attr, np.array(val) if isinstance(val, list) else val)
+
+    class _GerenciadorMock:
+        def __init__(self2):
+            self2.memoria = mem
+            self2.escalonador = scaler
+            self2.incluir_hog = incluir_hog
+            self2.tamanho_alvo = (64, 64)
+            self2.semente_aleatoria = semente
+            self2.dados_brutos = None
+            self2.total_classes_vistas = data.get("total_classes_vistas", list(mem.mapeamento_classe_para_indice.keys()))
+            sess_info = data.get("sessione_info") or []
+            self2.sessoes = {
+                "sessao_base": [c for s in sess_info if s["tipo"] == "base" for c in s["classes"]],
+                "sessoes_incrementais": [s["classes"] for s in sess_info if s["tipo"] == "incremental"],
+            }
+    st.session_state.gerenciador = _GerenciadorMock()
+
+
+def _executar_en_colab(
+    nome_dataset, dataset_escolhido, pasta_dados,
+    numero_classes_base, classes_por_sessao, k_shot,
+    estrategia, incluir_hog, semente, solo_base=False,
+):
+    import requests as _requests
+    url_base = st.session_state.get("colab_api_url", "").rstrip("/")
+    if not url_base:
+        st.error("URL de Colab no configurada. Configúrela en la barra lateral.")
+        return
+
+    endpoint = "/iniciar" if solo_base else "/analizar"
+    payload = {
+        "dataset": nome_dataset,
+        "data_dir": pasta_dados,
+        "classes_base": numero_classes_base,
+        "n_way": classes_por_sessao,
+        "k_shot": k_shot,
+        "estrategia": estrategia,
+        "incluir_hog": incluir_hog,
+        "semilla": semente,
+    }
+
+    with st.spinner(f"{'Configurando sesión base en Colab...' if solo_base else 'Ejecutando experimento completo en Colab...'}"):
+        try:
+            r = _requests.post(f"{url_base}{endpoint}", json=payload, timeout=3600)
+            if r.status_code != 200:
+                st.error(f"Error en Colab ({r.status_code}): {r.text}")
+                return
+            data = r.json()
+            if data.get("status") not in ("ok", "completado"):
+                st.error(f"Error en Colab: {data.get('message', 'desconocido')}")
+                return
+
+            _reconstruir_desde_estado_colab(data, incluir_hog, semente, dataset_escolhido)
+
+            if solo_base:
+                st.success(
+                    "Sesión base ejecutada en Colab. Ve a 'Ejecución Incremental' "
+                    "para simular las safras una por una."
+                )
+                st.rerun()
+            else:
+                st.success(
+                    f"Experimento completo ejecutado en Colab. "
+                    f"μ={data.get('resultados', {}).get('acuracia_media', '?'):.4f}"
+                )
+                st.rerun()
+
+        except _requests.exceptions.Timeout:
+            st.error("La solicitud a Colab excedió el tiempo de espera (1 h). Revise el notebook.")
+        except _requests.exceptions.ConnectionError:
+            st.error(f"No se pudo conectar a {url_base}. ¿Está corriendo ngrok en Colab?")
+        except Exception as e:
+            st.error(f"Error al comunicarse con Colab: {e}")
+
+
 def renderizar_aba_configuracao():
     st.header("Configuração do Experimento")
     with st.form("form_configuracao"):
@@ -329,6 +459,14 @@ def renderizar_aba_configuracao():
                 "Diretório dos dados brutos",
                 value=os.path.join(str(Path(__file__).parent), "data", "raw"),
             )
+            max_imagens = st.number_input(
+                "Máx. imágenes a cargar (0 = todas)",
+                min_value=0, max_value=50000, value=1000,
+                help="Limita la cantidad de imágenes cargadas en memoria. "
+                     "Útil para datasets grandes como PlantVillage (~54k imágenes). "
+                     "0 carga todas las imágenes.",
+            )
+            max_imagens = max_imagens if max_imagens > 0 else None
             semente = st.number_input(
                 "Semente aleatória", min_value=0, max_value=2**31 - 1, value=42,
             )
@@ -355,19 +493,41 @@ def renderizar_aba_configuracao():
             )
             incluir_hog = st.checkbox("Incluir descritores HOG", value=False)
         st.markdown("---")
-        st.markdown(
-            "**Importante:** Los datasets CIFAR-100, PlantVillage y PlantDoc deben estar "
-            "descargados manualmente y colocados en el directorio de datos antes de cargarlos."
-        )
-        botao_configurar = st.form_submit_button("Carregar e Configurar", type="primary")
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            botao_configurar = st.form_submit_button("Carregar e Configurar (local)", type="primary")
+        with col_btn2:
+            tem_colab = bool(st.session_state.get("colab_api_url"))
+            botao_colab = st.form_submit_button(
+                "Ejecutar en Colab (completo)",
+                type="primary",
+                disabled=not tem_colab,
+            )
+        if tem_colab:
+            colab_incremental = st.checkbox(
+                "Modo incremental paso a paso (solo sesión base ahora)",
+                key="colab_modo_incremental",
+                help="Ejecuta solo la sesión base en Colab; luego usa la pestaña "
+                     "'Ejecución Incremental' para simular cada safra manualmente.",
+            )
+            if colab_incremental:
+                botao_colab_incremental = st.form_submit_button(
+                    "Configurar sesión base en Colab",
+                    type="secondary",
+                )
     if botao_configurar:
         with st.spinner("Carregando dataset..."):
             try:
-                dados_brutos = carregar_dataset_bruto(nome_dataset, pasta_dados)
-                st.success(
-                    f"Dataset carregado: {dados_brutos['imagens'].shape[0]} imagens, "
-                    f"{len(np.unique(dados_brutos['rotulos']))} classes."
+                dados_brutos = carregar_dataset_bruto(
+                    nome_dataset, pasta_dados,
+                    max_imagens=max_imagens,
+                    semente=semente,
                 )
+                n_imgs = dados_brutos["imagens"].shape[0]
+                n_cls = len(np.unique(dados_brutos["rotulos"]))
+                st.success(f"Dataset carregado: {n_imgs} imagens, {n_cls} classes.")
+                if max_imagens and n_imgs < max_imagens:
+                    st.info(f"Dataset tem menos de {max_imagens} imagens, carregadas todas.")
             except Exception as erro:
                 st.error(f"Erro ao carregar dataset: {erro}")
                 return
@@ -394,6 +554,7 @@ def renderizar_aba_configuracao():
         st.session_state.sessao_atual = 0
         st.session_state.total_sessoes = gerenciador.obter_numero_sessoes_disponiveis()
         st.session_state.configurado = True
+        st.session_state["importado_desde_colab"] = False
         st.session_state.resultados = gerenciador.obter_relatorio()
         st.session_state.indice_ultima_sessao = 0
         st.session_state.config_experimento = {
@@ -416,6 +577,67 @@ def renderizar_aba_configuracao():
             "Configuração concluída! Vá para a aba 'Execução Incremental' "
             "para simular a chegada de novas safras."
         )
+    if botao_colab:
+        _executar_en_colab(
+            nome_dataset=nome_dataset,
+            dataset_escolhido=dataset_escolhido,
+            pasta_dados=pasta_dados,
+            numero_classes_base=numero_classes_base,
+            classes_por_sessao=classes_por_sessao,
+            k_shot=k_shot,
+            estrategia=estrategia,
+            incluir_hog=incluir_hog,
+            semente=semente,
+            solo_base=False,
+        )
+    if locals().get("botao_colab_incremental", False):
+        _executar_en_colab(
+            nome_dataset=nome_dataset,
+            dataset_escolhido=dataset_escolhido,
+            pasta_dados=pasta_dados,
+            numero_classes_base=numero_classes_base,
+            classes_por_sessao=classes_por_sessao,
+            k_shot=k_shot,
+            estrategia=estrategia,
+            incluir_hog=incluir_hog,
+            semente=semente,
+            solo_base=True,
+        )
+
+
+def _ejecutar_sesion_colab(k_shot, estrategia):
+    import requests as _requests
+    url_base = st.session_state.get("colab_api_url", "").rstrip("/")
+    if not url_base:
+        st.error("URL de Colab no configurada.")
+        return False
+    try:
+        r = _requests.post(
+            f"{url_base}/ejecutar-sesion",
+            json={"k_shot": k_shot, "estrategia": estrategia},
+            timeout=600,
+        )
+        if r.status_code != 200:
+            st.error(f"Error en Colab ({r.status_code}): {r.text}")
+            return False
+        data = r.json()
+        if data.get("status") not in ("ok", "completado"):
+            st.error(f"Error en Colab: {data.get('message', 'desconocido')}")
+            return False
+        _reconstruir_desde_estado_colab(
+            data,
+            incluir_hog=st.session_state.get("gerenciador", None) is not None and st.session_state.gerenciador.incluir_hog or False,
+            semente=st.session_state.config_experimento.get("semente", 42),
+            dataset_escolhido=st.session_state.config_experimento,
+        )
+        return True
+    except _requests.exceptions.Timeout:
+        st.error("Colab no respondió a tiempo.")
+    except _requests.exceptions.ConnectionError:
+        st.error("No se pudo conectar a Colab.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+    return False
 
 
 def renderizar_aba_execucao():
@@ -423,13 +645,27 @@ def renderizar_aba_execucao():
     if not st.session_state.configurado:
         st.warning("Configure o experimento na aba 'Configuração' primeiro.")
         return
+
+    desde_colab = st.session_state.get("importado_desde_colab", False)
+    url_colab = st.session_state.get("colab_api_url", "").strip()
+    modo_colab_inc = desde_colab and bool(url_colab)
+
     gerenciador = st.session_state.gerenciador
     sessao_atual = st.session_state.indice_ultima_sessao
     sessoes_incrementais = gerenciador.sessoes["sessoes_incrementais"]
     total_sessoes_inc = len(sessoes_incrementais)
+
     if sessao_atual >= total_sessoes_inc:
         st.success("Todas as sessões foram executadas! Veja os resultados na aba 'Resultados'.")
         return
+
+    if desde_colab and not modo_colab_inc:
+        st.warning(
+            "Ejecución Incremental no disponible: el experimento se ejecutó completo en Colab "
+            "y no quedan sesiones pendientes. Ve a Resultados para ver las métricas."
+        )
+        return
+
     st.markdown(f"### Sessão incremental {sessao_atual + 1} de {total_sessoes_inc}")
     classes_nesta_sessao = sessoes_incrementais[sessao_atual]
     nomes = gerenciador.memoria.obter_mapeamento_classes_para_nomes()
@@ -447,57 +683,64 @@ def renderizar_aba_execucao():
         })
     import pandas as pd
     st.dataframe(pd.DataFrame(dados_plagas), width="stretch", hide_index=True)
-    with st.expander("Ver imágenes de ejemplo de las nuevas clases"):
-        for classe in classes_nesta_sessao:
-            clave = nomes.get(int(classe), f"Classe {classe}")
-            info = GUIA_COMPLETA.get(clave, {})
-            dados_amostra = _preparar_dados_sessao(
-                gerenciador.dados_brutos,
-                [int(classe)],
-                quantidade_por_classe=3,
-                semente_aleatoria=gerenciador.semente_aleatoria + sessao_atual,
-                modo_treino=False,
-            )
-            st.markdown(f"**{formatear_nombre_plaga(clave)}**")
-            cols_imgs = st.columns(min(3, len(dados_amostra["imagens"])))
-            for idx_col, (col_img, img) in enumerate(zip(cols_imgs, dados_amostra["imagens"][:3])):
-                with col_img:
-                    st.image(img, width=120, caption=f"Ejemplo {idx_col + 1}")
+
+    if not desde_colab:
+        with st.expander("Ver imágenes de ejemplo de las nuevas clases"):
+            for classe in classes_nesta_sessao:
+                clave = nomes.get(int(classe), f"Classe {classe}")
+                dados_amostra = _preparar_dados_sessao(
+                    gerenciador.dados_brutos,
+                    [int(classe)],
+                    quantidade_por_classe=3,
+                    semente_aleatoria=gerenciador.semente_aleatoria + sessao_atual,
+                    modo_treino=False,
+                )
+                st.markdown(f"**{formatear_nombre_plaga(clave)}**")
+                cols_imgs = st.columns(min(3, len(dados_amostra["imagens"])))
+                for idx_col, (col_img, img) in enumerate(zip(cols_imgs, dados_amostra["imagens"][:3])):
+                    with col_img:
+                        st.image(img, width=120, caption=f"Ejemplo {idx_col + 1}")
+
     k_shot = st.number_input(
         "K (exemplos por classe para esta sessão)",
-        min_value=1,
-        max_value=50,
-        value=5,
+        min_value=1, max_value=50, value=5,
         key=f"k_shot_{sessao_atual}",
     )
     estrategia = st.session_state.get("estrategia_atual", "media_simples")
     col_b1, col_b2, col_b3 = st.columns(3)
     with col_b1:
+        label_btn = f"{'Ejecutar en Colab' if modo_colab_inc else 'Simular'} chegada da safra {sessao_atual + 1}"
         botao_executar = st.button(
-            f"Simular chegada da safra {sessao_atual + 1}",
-            type="primary",
+            label_btn, type="primary",
             disabled=st.session_state.executando,
         )
     if botao_executar:
         st.session_state.executando = True
-        with st.spinner(f"Processando sessão {sessao_atual + 1}..."):
-            try:
-                resultado = gerenciador.executar_sessao_incremental(
-                    sessao_atual,
-                    quantidade_por_classe=k_shot,
-                    estrategia_atualizacao=estrategia,
-                )
-                st.session_state.indice_ultima_sessao = sessao_atual + 1
-                st.session_state.resultados = gerenciador.obter_relatorio()
-                st.success(
-                    f"Sessão {sessao_atual + 1} concluída! "
-                    f"Acurácia acumulada: {resultado['metrica']:.3f}"
-                )
-                st.balloons()
-            except Exception as erro:
-                st.error(f"Erro durante execução: {erro}")
-            finally:
-                st.session_state.executando = False
+        if modo_colab_inc:
+            with st.spinner(f"Enviando a Colab (safra {sessao_atual + 1})..."):
+                ok = _ejecutar_sesion_colab(k_shot, estrategia)
+                if ok:
+                    st.success(f"Sessão {sessao_atual + 1} concluída via Colab!")
+                    st.balloons()
+        else:
+            with st.spinner(f"Processando sessão {sessao_atual + 1}..."):
+                try:
+                    resultado = gerenciador.executar_sessao_incremental(
+                        sessao_atual,
+                        quantidade_por_classe=k_shot,
+                        estrategia_atualizacao=estrategia,
+                    )
+                    st.session_state.indice_ultima_sessao = sessao_atual + 1
+                    st.session_state.resultados = gerenciador.obter_relatorio()
+                    st.success(
+                        f"Sessão {sessao_atual + 1} concluída! "
+                        f"Acurácia acumulada: {resultado['metrica']:.3f}"
+                    )
+                    st.balloons()
+                except Exception as erro:
+                    st.error(f"Erro durante execução: {erro}")
+                finally:
+                    st.session_state.executando = False
     historico = st.session_state.resultados["historico_acuracias"]
     if len(historico) > 0:
         st.subheader("Curva de Acurácia (atualizada)")
@@ -636,6 +879,261 @@ def renderizar_aba_resultados():
                     hide_index=True,
                 )
 
+    # ---- Importar resultados de Colab ----
+    with st.expander("Importar resultados de Colab / JSON externo"):
+        st.markdown(
+            "Sube el archivo JSON generado por `colab_pipeline.py` en Google Colab "
+            "para visualizar las métricas sin necesidad de ejecutar el pipeline localmente."
+        )
+        archivo_colab = st.file_uploader(
+            "Seleccionar archivo JSON de Colab",
+            type=["json"],
+            key="upload_colab",
+        )
+        if archivo_colab is not None:
+            try:
+                datos_importados = _json.loads(
+                    archivo_colab.read().decode("utf-8")
+                )
+                config_imp = datos_importados.get("config", {})
+                res_imp = datos_importados["resultados"]
+                st.session_state.resultados = {
+                    "historico_acuracias": res_imp["historico_acuracias"],
+                    "acuracia_media": res_imp["acuracia_media"],
+                    "performance_dropping_rate": res_imp["performance_dropping_rate"],
+                    "esquecimento_medio": res_imp["esquecimento_medio"],
+                    "historico_matrizes": [np.array(m) for m in res_imp["historico_matrizes"]],
+                }
+                st.session_state.config_experimento = config_imp
+                st.session_state.configurado = True
+                st.session_state["importado_desde_colab"] = True
+                st.session_state["indice_ultima_sessao"] = len(res_imp["historico_acuracias"]) - 1
+                memoria_data = datos_importados.get("memoria")
+                escalonador_data = datos_importados.get("escalonador")
+                from src.prototype_memory import MemoriaDePrototipos
+                from sklearn.preprocessing import StandardScaler
+                mem = MemoriaDePrototipos()
+                if memoria_data and memoria_data.get("prototipos") is not None:
+                    mem.prototipos = np.array(memoria_data["prototipos"])
+                    mem.mapeamento_classe_para_indice = {
+                        int(k): v for k, v in memoria_data.get("mapeamento_classe_para_indice", {}).items()
+                    }
+                    mem.mapeamento_indice_para_classe = {
+                        int(k): v for k, v in memoria_data.get("mapeamento_indice_para_classe", {}).items()
+                    }
+                    mem.nomes_classes = {
+                        int(k): v for k, v in memoria_data.get("nomes_classes", {}).items()
+                    }
+                    mem.historico_contagem_amostras = {
+                        int(k): v for k, v in memoria_data.get("historico_contagem_amostras", {}).items()
+                    }
+                scaler = None
+                if escalonador_data:
+                    scaler = StandardScaler()
+                    for attr in ("mean_", "scale_", "var_", "n_features_in_", "n_samples_seen_"):
+                        val = escalonador_data.get(attr)
+                        if val is not None:
+                            setattr(scaler, attr, np.array(val) if isinstance(val, list) else val)
+                class GerenciadorMock:
+                    def __init__(self_):
+                        self_.memoria = mem
+                        self_.escalonador = scaler
+                        self_.incluir_hog = config_imp.get("incluir_hog", False)
+                        self_.tamanho_alvo = (64, 64)
+                        self_.semente_aleatoria = config_imp.get("semente", 42)
+                        self_.dados_brutos = None
+                        self_.total_classes_vistas = datos_importados.get(
+                            "total_classes_vistas",
+                            list(mem.mapeamento_classe_para_indice.keys()),
+                        )
+                        self_.sessoes = {"sessao_base": [], "sessoes_incrementais": []}
+                st.session_state.gerenciador = GerenciadorMock()
+                estado_msg = "com memoria de prototipos para diagnóstico" if mem.prototipos is not None else "solo métricas"
+                st.success(
+                    f"Experimento '{datos_importados.get('experiment_name', 'desconocido')}' "
+                    f"importado ({estado_msg}). "
+                    f"Dataset: {config_imp.get('dataset', '?')} | "
+                    f"Acurácia media: {res_imp['acuracia_media']:.4f}"
+                )
+                if mem.prototipos is not None:
+                    st.info(
+                        "Las pestañas 'Ejecución Incremental' y 'Espacio de Características' "
+                        "requieren datos brutos y no están disponibles en modo importado. "
+                        "Usa 'Diagnóstico de Campo' para clasificar imágenes nuevas."
+                    )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error al importar: {e}")
+
+    with st.expander("Comparación de Estratégias de Atualização"):
+        st.markdown(
+            "Ejecuta el experimento con las 3 estrategias de actualización de prototipos "
+            "y compara los resultados."
+        )
+        if st.button("Ejecutar comparación de estrategias", type="primary", key="btn_comp_estrategias"):
+            if st.session_state.get("importado_desde_colab"):
+                st.warning("No disponible en modo importado. Ejecute el pipeline localmente.")
+            else:
+                with st.spinner("Ejecutando las 3 estrategias (esto puede tomar tiempo)..."):
+                    try:
+                        estrategias_lista = ["media_simples", "media_movel_exponencial", "recalibracao_por_contagem"]
+                        nomes_estrategias = {"media_simples": "Média Simples", "media_movel_exponencial": "EMA", "recalibracao_por_contagem": "Recalib. Contagem"}
+                        cores_estrategias = {"media_simples": "#1f77b4", "media_movel_exponencial": "#2ca02c", "recalibracao_por_contagem": "#d62728"}
+                        resultados_comp = {}
+                        config_exp = st.session_state.config_experimento
+                        for est in estrategias_lista:
+                            g_temp = GerenciadorDeSessoes(
+                                dados_brutos=st.session_state.gerenciador.dados_brutos,
+                                sessoes=st.session_state.gerenciador.sessoes,
+                                tamanho_alvo=(64, 64),
+                                incluir_hog=config_exp.get("incluir_hog", False),
+                                semente_aleatoria=config_exp.get("semente", 42),
+                                nomes_classes_externos=None,
+                            )
+                            g_temp.executar_sessao_base()
+                            n_inc = len(g_temp.sessoes["sessoes_incrementais"])
+                            n_limite = min(n_inc, 5)
+                            for idx in range(n_limite):
+                                g_temp.executar_sessao_incremental(
+                                    idx,
+                                    quantidade_por_classe=config_exp.get("k_shot", 5),
+                                    estrategia_atualizacao=est,
+                                )
+                            rel = g_temp.obter_relatorio()
+                            resultados_comp[est] = {
+                                "historico": rel["historico_acuracias"],
+                                "acuracia_media": rel["acuracia_media"],
+                                "pd": rel["performance_dropping_rate"],
+                                "forgetting": rel["esquecimento_medio"],
+                            }
+                        st.session_state["resultados_comparacion"] = resultados_comp
+                        st.success("Comparación completada!")
+                    except Exception as e:
+                        st.error(f"Error en la comparación: {e}")
+
+        if st.session_state.get("resultados_comparacion"):
+            resultados_comp = st.session_state["resultados_comparacion"]
+            estrategias_lista = ["media_simples", "media_movel_exponencial", "recalibracao_por_contagem"]
+            nomes_estrategias = {"media_simples": "Média Simples", "media_movel_exponencial": "EMA", "recalibracao_por_contagem": "Recalib. Contagem"}
+            cores_estrategias = {"media_simples": "#1f77b4", "media_movel_exponencial": "#2ca02c", "recalibracao_por_contagem": "#d62728"}
+
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                fig_comp, ax_comp = plt.subplots(figsize=(10, 5))
+                for est in estrategias_lista:
+                    hist = resultados_comp[est]["historico"]
+                    ax_comp.plot(range(len(hist)), hist, "o-", color=cores_estrategias[est],
+                                 label=nomes_estrategias[est], linewidth=2, markersize=6)
+                ax_comp.set_xlabel("Sessão", fontsize=11)
+                ax_comp.set_ylabel("Acurácia", fontsize=11)
+                ax_comp.set_title("Curvas de Acurácia por Estratégia", fontsize=13, fontweight="bold")
+                ax_comp.set_ylim(0.0, 1.05)
+                ax_comp.legend(fontsize=9)
+                ax_comp.grid(True, alpha=0.3)
+                ax_comp.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+                plt.tight_layout()
+                st.pyplot(fig_comp)
+
+            with col_c2:
+                fig_bar, ax_bar = plt.subplots(figsize=(10, 5))
+                x = np.arange(len(estrategias_lista))
+                width = 0.25
+                media_vals = [resultados_comp[e]["acuracia_media"] for e in estrategias_lista]
+                pd_vals = [resultados_comp[e]["pd"] for e in estrategias_lista]
+                forg_vals = [resultados_comp[e]["forgetting"] for e in estrategias_lista]
+                ax_bar.bar(x - width, media_vals, width, label="Acurácia Média", color="steelblue")
+                ax_bar.bar(x, pd_vals, width, label="PD Rate", color="coral")
+                ax_bar.bar(x + width, forg_vals, width, label="Forgetting", color="salmon")
+                ax_bar.set_xticks(x)
+                ax_bar.set_xticklabels([nomes_estrategias[e] for e in estrategias_lista], fontsize=9)
+                ax_bar.set_title("Métricas por Estratégia", fontsize=13, fontweight="bold")
+                ax_bar.legend(fontsize=9)
+                ax_bar.grid(True, alpha=0.3, axis="y")
+                plt.tight_layout()
+                st.pyplot(fig_bar)
+
+            st.subheader("Tabla comparativa")
+            dados_tabela_comp = []
+            for est in estrategias_lista:
+                r = resultados_comp[est]
+                dados_tabela_comp.append({
+                    "Estratégia": nomes_estrategias[est],
+                    "Acc. Média": f"{r['acuracia_media']:.4f}",
+                    "PD Rate": f"{r['pd']:.4f}",
+                    "Forgetting": f"{r['forgetting']:.4f}",
+                })
+            st.dataframe(pd.DataFrame(dados_tabela_comp), width="stretch", hide_index=True)
+
+    with st.expander("Análisis de Sensibilidad (K-shot)"):
+        st.markdown(
+            "Evalúa cómo varían las métricas al cambiar el número de ejemplos por clase (K-shot)."
+        )
+        if st.button("Ejecutar análisis K-shot", type="primary", key="btn_kshot"):
+            if st.session_state.get("importado_desde_colab"):
+                st.warning("No disponible en modo importado.")
+            else:
+                with st.spinner("Ejecutando análisis con diferentes K (puede tomar tiempo)..."):
+                    try:
+                        k_values = [1, 3, 5, 10, 20]
+                        resultados_k = []
+                        config_exp = st.session_state.config_experimento
+                        n_inc = len(st.session_state.gerenciador.sessoes["sessoes_incrementais"])
+                        n_limite = min(n_inc, 5)
+                        for k in k_values:
+                            g_k = GerenciadorDeSessoes(
+                                dados_brutos=st.session_state.gerenciador.dados_brutos,
+                                sessoes=st.session_state.gerenciador.sessoes,
+                                tamanho_alvo=(64, 64),
+                                incluir_hog=config_exp.get("incluir_hog", False),
+                                semente_aleatoria=config_exp.get("semente", 42),
+                                nomes_classes_externos=None,
+                            )
+                            g_k.executar_sessao_base()
+                            for idx in range(n_limite):
+                                g_k.executar_sessao_incremental(
+                                    idx, quantidade_por_classe=k, estrategia_atualizacao="media_simples"
+                                )
+                            rel_k = g_k.obter_relatorio()
+                            resultados_k.append({
+                                "k": k, "acc_media": rel_k["acuracia_media"],
+                                "pd": rel_k["performance_dropping_rate"],
+                                "forgetting": rel_k["esquecimento_medio"],
+                            })
+                        st.session_state["resultados_kshot"] = resultados_k
+                        st.success("Análisis K-shot completado!")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        if st.session_state.get("resultados_kshot"):
+            resultados_k = st.session_state["resultados_kshot"]
+            df_k = pd.DataFrame(resultados_k)
+
+            fig_k, axes_k = plt.subplots(1, 3, figsize=(15, 4))
+            axes_k[0].plot(df_k["k"], df_k["acc_media"], "bo-", linewidth=2, markersize=8)
+            axes_k[0].set_xlabel("K-shot", fontsize=11)
+            axes_k[0].set_ylabel("Acurácia Media", fontsize=11)
+            axes_k[0].set_title("Acc. vs K-shot", fontsize=12, fontweight="bold")
+            axes_k[0].grid(True, alpha=0.3)
+
+            axes_k[1].plot(df_k["k"], df_k["pd"], "ro-", linewidth=2, markersize=8)
+            axes_k[1].set_xlabel("K-shot", fontsize=11)
+            axes_k[1].set_ylabel("PD Rate", fontsize=11)
+            axes_k[1].set_title("PD Rate vs K-shot", fontsize=12, fontweight="bold")
+            axes_k[1].grid(True, alpha=0.3)
+
+            axes_k[2].plot(df_k["k"], df_k["forgetting"], "go-", linewidth=2, markersize=8)
+            axes_k[2].set_xlabel("K-shot", fontsize=11)
+            axes_k[2].set_ylabel("Forgetting", fontsize=11)
+            axes_k[2].set_title("Forgetting vs K-shot", fontsize=12, fontweight="bold")
+            axes_k[2].grid(True, alpha=0.3)
+
+            plt.suptitle("Sensibilidad al número de ejemplos por clase (K-shot)", fontsize=14, fontweight="bold")
+            plt.tight_layout()
+            st.pyplot(fig_k)
+
+            st.subheader("Resultados K-shot")
+            st.dataframe(df_k, width="stretch", hide_index=True)
+
     with st.expander("Exportar resultados"):
         import pandas as pd
         col_exp1, col_exp2 = st.columns(2)
@@ -672,6 +1170,13 @@ def renderizar_aba_espaco():
     st.header("Espaço de Características")
     if not st.session_state.configurado:
         st.warning("Configure o experimento primeiro.")
+        return
+    if st.session_state.get("importado_desde_colab"):
+        st.warning(
+            "Espaço de Características não está disponível no modo importado, "
+            "pois requer os datos brutos do dataset. Execute o pipeline localmente "
+            "ou use a aba Diagnóstico de Campo para classificar imagens individualmente."
+        )
         return
     gerenciador = st.session_state.gerenciador
     memoria = gerenciador.memoria
@@ -714,6 +1219,96 @@ def renderizar_aba_espaco():
         "Os 'X' vermelhos são os protótipos de cada classe."
     )
 
+    with st.expander("PCA dos Protótipos por Sessão de Origem", expanded=False):
+        if prototipos.shape[0] > 2:
+            pca_protos = PCA(n_components=2, random_state=42)
+            protos_2d = pca_protos.fit_transform(prototipos)
+            sessoes = gerenciador.sessoes
+            protos_sessao = []
+            for rotulo in memoria.obter_rotulos_ordenados():
+                if rotulo in sessoes["sessao_base"]:
+                    protos_sessao.append(0)
+                else:
+                    assigned = False
+                    for i, ses in enumerate(sessoes["sessoes_incrementais"]):
+                        if rotulo in ses:
+                            protos_sessao.append(i + 1)
+                            assigned = True
+                            break
+                    if not assigned:
+                        protos_sessao.append(0)
+            fig_proto, ax_proto = plt.subplots(figsize=(10, 8))
+            scatter = ax_proto.scatter(
+                protos_2d[:, 0], protos_2d[:, 1],
+                c=protos_sessao, cmap="Set2", s=100, alpha=0.8,
+                edgecolors="black", linewidths=0.5,
+            )
+            for i, rotulo in enumerate(memoria.obter_rotulos_ordenados()):
+                nome = memoria.nomes_classes.get(rotulo, f"C{rotulo}")
+                ax_proto.annotate(nome[:12], (protos_2d[i, 0], protos_2d[i, 1]), fontsize=7, alpha=0.8)
+            cbar = plt.colorbar(scatter, ax=ax_proto, ticks=range(max(protos_sessao) + 1))
+            cbar.set_label("Sesión de origen")
+            ax_proto.set_xlabel(f"PC1 ({pca_protos.explained_variance_ratio_[0]:.1%})", fontsize=11)
+            ax_proto.set_ylabel(f"PC2 ({pca_protos.explained_variance_ratio_[1]:.1%})", fontsize=11)
+            ax_proto.set_title("PCA de los Prototipos por Sesión de Origen", fontsize=13, fontweight="bold")
+            ax_proto.grid(True, alpha=0.3)
+            plt.tight_layout()
+            st.pyplot(fig_proto)
+            st.caption(
+                f"Prototipos totales: {prototipos.shape[0]} | "
+                f"Dimensión de cada prototipo: {prototipos.shape[1]}D"
+            )
+
+
+def _diagnosticar_local(imagem_np, gerenciador):
+    memoria = gerenciador.memoria
+    nomes_classes = memoria.obter_mapeamento_classes_para_nomes()
+    preprocessado = pipeline_completo_preprocessamento(
+        np.expand_dims(imagem_np, axis=0),
+        tamanho_alvo=gerenciador.tamanho_alvo,
+    )
+    caracteristicas, _ = extrair_todas_caracteristicas(
+        preprocessado["imagens_cinza"],
+        preprocessado["mascaras_binarias"],
+        incluir_hog=gerenciador.incluir_hog,
+        escalonador=gerenciador.escalonador,
+    )
+    distancias, indices_ordenados = memoria.obter_distancias(caracteristicas)
+    distancias_ordenadas = distancias[0, indices_ordenados[0]]
+    classe_predita = memoria.classificar(caracteristicas)[0]
+    clave_predita = nomes_classes.get(int(classe_predita), f"Classe {classe_predita}")
+    distancia_minima = distancias_ordenadas[0]
+    confianca = 1.0 / (1.0 + distancia_minima)
+    top3 = []
+    for rank in range(min(3, len(distancias_ordenadas))):
+        indice = indices_ordenados[0, rank]
+        rotulo = memoria.mapeamento_indice_para_classe[indice]
+        clave = nomes_classes.get(int(rotulo), f"Classe {rotulo}")
+        top3.append({"clave": clave, "distancia": float(distancias_ordenadas[rank])})
+    return clave_predita, confianca, top3
+
+
+def _diagnosticar_colab(imagem_np):
+    import requests as _requests
+    import io as _io
+    from PIL import Image as _PIL
+
+    url_base = st.session_state.get("colab_api_url", "").rstrip("/")
+    buf = _io.BytesIO()
+    _PIL.fromarray(imagem_np).save(buf, format="PNG")
+    buf.seek(0)
+    r = _requests.post(f"{url_base}/diagnosticar", files={"image": ("leaf.png", buf, "image/png")}, timeout=30)
+    if r.status_code != 200:
+        st.error(f"Error en Colab: {r.text}")
+        return None, None, None
+    data = r.json()
+    if data.get("status") != "ok":
+        st.error(f"Error en Colab: {data.get('message', 'desconocido')}")
+        return None, None, None
+    return data["diagnostico"], data["confianza"], [
+        {"clave": t["clase"], "distancia": t["distancia"]} for t in data["top3"]
+    ]
+
 
 def renderizar_aba_demo():
     st.header("Diagnóstico de Campo")
@@ -724,79 +1319,83 @@ def renderizar_aba_demo():
     if not st.session_state.configurado:
         st.warning("Configure e execute o experimento primeiro.")
         return
+
+    colab_url = st.session_state.get("colab_api_url", "").strip()
+    usar_colab = False
+    if colab_url:
+        usar_colab = st.checkbox("Usar servidor remoto (Colab)", value=False, key="diag_usar_colab")
+
     gerenciador = st.session_state.gerenciador
-    memoria = gerenciador.memoria
-    nomes_classes = memoria.obter_mapeamento_classes_para_nomes()
+    nomes_classes = gerenciador.memoria.obter_mapeamento_classes_para_nomes()
+
     arquivo_upload = st.file_uploader(
         "Escolha uma imagem de folha",
         type=["png", "jpg", "jpeg", "bmp", "tiff"],
     )
     if arquivo_upload is not None:
-        from skimage.io import imread
         from PIL import Image
 
         imagem_pil = Image.open(arquivo_upload).convert("RGB")
         imagem_np = np.array(imagem_pil)
         st.image(imagem_np, caption="Imagem enviada", width=300)
-        with st.spinner("Extraindo características..."):
-            preprocessado = pipeline_completo_preprocessamento(
-                np.expand_dims(imagem_np, axis=0),
-                tamanho_alvo=gerenciador.tamanho_alvo,
-            )
-            caracteristicas, _ = extrair_todas_caracteristicas(
-                preprocessado["imagens_cinza"],
-                preprocessado["mascaras_binarias"],
-                incluir_hog=gerenciador.incluir_hog,
-                escalonador=gerenciador.escalonador,
-            )
-        if memoria.prototipos is not None:
-            distancias, indices_ordenados = memoria.obter_distancias(caracteristicas)
-            distancias_ordenadas = distancias[0, indices_ordenados[0]]
-            st.subheader("Resultado del Diagnóstico")
-            classe_predita = memoria.classificar(caracteristicas)[0]
-            clave_predita = nomes_classes.get(
-                int(classe_predita), f"Classe {classe_predita}"
-            )
-            info_predita = GUIA_COMPLETA.get(clave_predita, {})
-            distancia_minima = distancias_ordenadas[0]
-            confianca = 1.0 / (1.0 + distancia_minima)
-            col_d1, col_d2, col_d3 = st.columns(3)
-            col_d1.metric("Diagnóstico", formatear_nombre_plaga(clave_predita))
-            col_d2.metric("Confianza (1/(1+d))", f"{confianca:.4f}")
-            col_d3.metric("Tipo", NOMBRE_TIPO.get(info_predita.get("tipo", ""), "-"))
-            if info_predita:
-                with st.expander("Ver detalles de esta plaga/enfermedad", expanded=True):
-                    st.markdown(f"**Agente causal:** {info_predita.get('agente_causal', '-')}")
-                    st.markdown(f"**Síntomas:** {info_predita.get('sintomas', '-')}")
-                    st.markdown(f"**Tratamiento sugerido:** {info_predita.get('tratamiento', '-')}")
-            st.markdown("#### Top-3 clases más cercanas")
-            dados_tabela = []
-            for rank in range(min(3, len(distancias_ordenadas))):
-                indice = indices_ordenados[0, rank]
-                rotulo = gerenciador.memoria.mapeamento_indice_para_classe[indice]
-                clave = nomes_classes.get(int(rotulo), f"Classe {rotulo}")
-                dados_tabela.append(
-                    {
-                        "Rank": rank + 1,
-                        "Nombre común": formatear_nombre_plaga(clave),
-                        "Distancia Euclidiana": f"{distancias_ordenadas[rank]:.4f}",
-                    }
-                )
-            import pandas as pd
 
-            st.table(pd.DataFrame(dados_tabela))
-            if confianca < 0.3:
-                st.warning(
-                    "Confianza baja en todas las clases conocidas. "
-                    "Podría ser una enfermedad/plaga nueva. Considere registrar una nueva clase."
+        with st.spinner(f"{'Enviando a Colab' if usar_colab else 'Procesando localmente'}..."):
+            if usar_colab:
+                clave_predita, confianca, top3 = _diagnosticar_colab(imagem_np)
+            else:
+                if gerenciador.memoria.prototipos is None:
+                    st.warning("Memória de protótipos vazia. Execute o experimento primeiro.")
+                    return
+                clave_predita, confianca, top3 = _diagnosticar_local(imagem_np, gerenciador)
+
+        if clave_predita is None:
+            return
+
+        info_predita = GUIA_COMPLETA.get(clave_predita, {})
+        st.subheader("Resultado del Diagnóstico")
+        col_d1, col_d2, col_d3 = st.columns(3)
+        col_d1.metric("Diagnóstico", formatear_nombre_plaga(clave_predita))
+        col_d2.metric("Confianza (1/(1+d))", f"{confianca:.4f}")
+        col_d3.metric("Tipo", NOMBRE_TIPO.get(info_predita.get("tipo", ""), "-"))
+        if info_predita:
+            with st.expander("Ver detalles de esta plaga/enfermedad", expanded=True):
+                st.markdown(f"**Agente causal:** {info_predita.get('agente_causal', '-')}")
+                st.markdown(f"**Síntomas:** {info_predita.get('sintomas', '-')}")
+                st.markdown(f"**Tratamiento sugerido:** {info_predita.get('tratamiento', '-')}")
+        st.markdown("#### Top-3 clases más cercanas")
+        dados_tabela = []
+        for rank, item in enumerate(top3):
+            dados_tabela.append({
+                "Rank": rank + 1,
+                "Nombre común": formatear_nombre_plaga(item["clave"]),
+                "Distancia Euclidiana": f'{item["distancia"]:.4f}',
+            })
+        import pandas as pd
+        st.table(pd.DataFrame(dados_tabela))
+        with st.expander("Ver pasos de pré-processamento", expanded=False):
+            preproc_diag = pipeline_completo_preprocessamento(
+                np.expand_dims(imagem_np, axis=0), tamanho_alvo=gerenciador.tamanho_alvo,
+            )
+            col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+            with col_p1:
+                st.image(imagem_np, caption="Original", width=140)
+            with col_p2:
+                st.image(preproc_diag["imagens_cinza"][0], caption="Escala de Cinza", width=140, clamp=True)
+            with col_p3:
+                st.image(preproc_diag["imagens_normalizadas"][0], caption="Normalizado", width=140, clamp=True)
+            with col_p4:
+                st.image(preproc_diag["mascaras_binarias"][0], caption="Máscara Sauvola", width=140, clamp=True)
+
+        if confianca < 0.3:
+            st.warning(
+                "Confianza baja en todas las clases conocidas. "
+                "Podría ser una enfermedad/plaga nueva. Considere registrar una nueva clase."
+            )
+            if st.button("Registrar como nueva enfermedad", type="secondary"):
+                st.info(
+                    "Esta funcionalidad permite al usuario proporcionar K fotos "
+                    "y confirmar el diagnóstico para incorporar la nueva clase al sistema."
                 )
-                if st.button("Registrar como nueva enfermedad", type="secondary"):
-                    st.info(
-                        "Esta funcionalidad permite al usuario proporcionar K fotos "
-                        "y confirmar el diagnóstico para incorporar la nueva clase al sistema."
-                    )
-        else:
-            st.warning("Memória de protótipos vazia. Execute a sessão base primeiro.")
 
 
 def renderizar_aba_guia():
