@@ -121,10 +121,20 @@ Imagens RGB
 | matplotlib       | ≥3.7   | Gráficos e visualizações                         |
 | SciPy            | ≥1.11  | Distância euclidiana vetorizada (cdist)          |
 | huggingface-hub  | —      | Download de datasets via Hugging Face (opcional) |
+| Flask            | —      | API server para execução remota via Colab        |
+| pyngrok          | —      | Tunnel ngrok para expor API do Colab             |
+| requests         | —      | Comunicação HTTP entre app local e Colab         |
 
 ---
 
 ## Algoritmos
+
+### 0. Carregamento de Dataset (`src/dataset_loader.py`)
+
+- Suporte a datasets: Sintético, CIFAR-100, PlantVillage, PlantDoc
+- **Amostragem otimizada:** Os datasets grandes (ex.: PlantVillage com ~54k imagens) primeiro coletam apenas os caminhos dos arquivos, depois amostram aleatoriamente um subconjunto antes de carregar as imagens em memória
+- **Parâmetro `max_imagens`:** Limita a quantidade de imagens carregadas, configurável na interface; útil para ambientes com memória restrita
+- Carregamento lazy de imagens apenas após a amostragem, evitando picos de memória
 
 ### 1. Pré-processamento (`src/preprocessing.py`)
 
@@ -186,10 +196,13 @@ Protótipo_c = μ_c = (1/N_c) * Σ f_i   para todo i em classe c
 PDI-FSCIL-CONTROL-PLAGAS/
 ├── README.md                          # Este documento
 ├── fscil_lab/
-│   ├── app.py                         # Interface Streamlit (6 abas)
+│   ├── app.py                         # Interface Streamlit (6 abas + Colab, experimentos)
+│   ├── colab_api.py                   # API Flask para execução remota via Colab + ngrok
+│   ├── colab_pipeline.py              # Script standalone para executar pipeline no Colab
 │   ├── requirements.txt               # Dependências Python
 │   ├── download_datasets.sh           # Script de download dos datasets
 │   ├── organize_datasets.sh           # Script para organizar a estrutura dos datasets
+│   ├── saved_experiments/             # Experimentos salvos em JSON (gerado em runtime)
 │   ├── data/
 │   │   ├── raw/                       # Datasets brutos (gitignored)
 │   │   │   ├── cifar100/              # CIFAR-100 (meta, train, test)
@@ -198,7 +211,7 @@ PDI-FSCIL-CONTROL-PLAGAS/
 │   │   └── sessions/                  # Cache de sessões (gitignored)
 │   ├── src/
 │   │   ├── __init__.py
-│   │   ├── dataset_loader.py          # Carga de datasets (sintético, CIFAR-100, PlantVillage, PlantDoc)
+│   │   ├── dataset_loader.py          # Carga de datasets (com amostragem otimizada)
 │   │   ├── preprocessing.py           # Pipeline de pré-processamento
 │   │   ├── feature_extraction.py      # Extração de características (GLCM, Hu, morfologia, HOG)
 │   │   ├── prototype_memory.py        # Memória de protótipos (NCM)
@@ -210,7 +223,8 @@ PDI-FSCIL-CONTROL-PLAGAS/
 │   │   ├── __init__.py
 │   │   └── test_pipeline.py           # Testes unitários
 │   └── notebooks/
-│       └── validacao_pipeline.ipynb   # Notebook de validação
+│       ├── validacao_pipeline.ipynb   # Notebook de validação
+│       └── FSCIL_Colab_Pipeline (3).ipynb  # Notebook completo para executar no Colab
 └── docs/
     └── screenshots/                   # Capturas de tela para o manual
 ```
@@ -316,7 +330,7 @@ Execute a aplicação:
 streamlit run fscil_lab/app.py
 ```
 
-A interface possui 6 abas. Abaixo o passo a passo de cada uma.
+A interface possui 6 abas. Na barra lateral há também uma seção **"Conexión Colab (ngrok)"** para configurar a integração com Google Colab. Abaixo o passo a passo de cada aba.
 
 ---
 
@@ -328,17 +342,21 @@ Nesta aba você define os parâmetros do experimento FSCIL:
 
 1. **Dataset:** Selecione entre Sintético (gera dados aleatórios), CIFAR-100, PlantVillage ou PlantDoc
 2. **Diretório dos dados brutos:** Caminho para a pasta com os datasets baixados (padrão: `data/raw`)
-3. **Semente aleatória:** Para reproducibilidade (padrão: 42)
-4. **Classes na sessão base:** Quantas classes diferentes compõem a primeira sessão
-5. **N (classes novas por safra):** N-way — quantas novas doenças surgem em cada sessão incremental
-6. **K (exemplos por classe nova):** K-shot — quantas imagens de treino por nova classe
-7. **Estratégia de atualização:** Como ajustar protótipos existentes ao incorporar novas classes:
+3. **Máx. imágenes a cargar:** Limite de imagens carregadas em memória (útil para datasets grandes como PlantVillage ~54k; 0 = todas)
+4. **Semente aleatória:** Para reproducibilidade (padrão: 42)
+5. **Classes na sessão base:** Quantas classes diferentes compõem a primeira sessão
+6. **N (classes novas por safra):** N-way — quantas novas doenças surgem em cada sessão incremental
+7. **K (exemplos por classe nova):** K-shot — quantas imagens de treino por nova classe
+8. **Estratégia de atualização:** Como ajustar protótipos existentes ao incorporar novas classes:
    - *Média simples:* não altera protótipos antigos
    - *Média móvel exponencial:* suavização exponencial dos protótipos
    - *Recalibração por contagem:* ponderação pelo histórico de amostras
-8. **Incluir descritores HOG:** Ativa extração HOG (aumenta dimensionalidade)
+9. **Incluir descritores HOG:** Ativa extração HOG (aumenta dimensionalidade)
 
-Clique em **"Carregar e Configurar"**. O sistema carregará o dataset, dividirá as sessões e executará a sessão base.
+Botões de ação:
+- **"Carregar e Configurar (local)":** Executa o pipeline completo localmente, carregando dataset, dividindo sessões e executando a sessão base.
+- **"Ejecutar en Colab (completo)":** Envia toda a configuração para o servidor Colab (requer URL ngrok configurada na barra lateral) e executa o experimento completo remotamente.
+- **"Configurar sesión base en Colab":** Modo incremental — executa apenas a sessão base no Colab; as sessões incrementais podem ser executadas passo a passo na aba "Ejecución Incremental".
 
 ---
 
@@ -351,7 +369,7 @@ Após configurar, vá para esta aba para simular a chegada de novas safras:
 1. O sistema mostra as **novas doenças/plagas** desta safra com informações da guia fitossanitária
 2. É possível **ver exemplos** das novas classes (expanda "Ver imágenes de ejemplo")
 3. Ajuste **K** (quantidade de exemplos) para esta sessão específica
-4. Clique em **"Simular chegada da safra N"**
+4. Clique em **"Simular chegada da safra N"** (execução local) ou **"Ejecutar en Colab"** (se o modo Colab incremental estiver ativo)
 
 A cada sessão:
 - As novas classes são adicionadas à memória de protótipos
@@ -359,6 +377,8 @@ A cada sessão:
 - A curva de acurácia é atualizada em tempo real
 
 Continue clicando até que todas as safras sejam processadas.
+
+> **Modo Colab:** Se você configurou o experimento usando "Configurar sesión base en Colab", o botão mudará para "Ejecutar en Colab" e cada safra será processada remotamente via API ngrok.
 
 ---
 
@@ -374,7 +394,16 @@ Após executar as sessões, visualize:
 - **Curva de Acurácia por Sessão:** Gráfico interativo
 - **Matriz de Confusão:** Da última sessão
 - **Tabela de classes** disponíveis na memória
-- **Exportação de resultados:**
+
+**Gestão de experimentos:**
+
+- **Guardar experimento:** Salva o experimento atual (config + métricas + matrizes) em `saved_experiments/` como JSON para análise posterior.
+- **Comparar con experimentos guardados:** Seleciona múltiplos experimentos salvos e sobrepõe suas curvas de acurácia, além de exibir uma tabela comparativa com métricas lado a lado.
+- **Comparación de Estratégias de Atualização:** Executa automaticamente o mesmo experimento com as 3 estratégias (média simples, EMA, recalibração por contagem) e exibe curvas, barras de métricas e tabela comparativa — ideal para escolher a melhor estratégia.
+- **Análisis de Sensibilidad (K-shot):** Avalia o impacto do número de exemplos por classe executando o pipeline com K = [1, 3, 5, 10, 20] e exibe gráficos de acurácia média, PD rate e forgetting vs K-shot.
+- **Importar resultados de Colab:** Carrega um arquivo JSON gerado por `colab_pipeline.py` para visualizar métricas de experimentos executados no Google Colab sem necessidade de rodar localmente.
+
+**Exportação de resultados:**
   - **CSV:** Precisão por sessão (para Excel/Google Sheets)
   - **JSON completo:** Inclui acurácias, PD rate, forgetting, matrizes de confusão e histórico por classe — ideal para análise externa com Python/R/Matlab
 
@@ -388,7 +417,8 @@ Visualização PCA 2D das características extraídas:
 - Cada ponto é uma imagem projetada nos 2 primeiros componentes principais
 - Cores distintas representam classes diferentes
 - "X" vermelhos são os protótipos (centróides) de cada classe
-- Útil para avaliar separabilidade e identificar confusões entre classes
+- Opção de colorir por **sessão de origem** em vez de por classe, para visualizar como as classes de diferentes safras se distribuem no espaço de características
+- Útil para avaliar separabilidade, identificar confusões entre classes e analisar o impacto incremental
 
 ---
 
@@ -396,17 +426,18 @@ Visualização PCA 2D das características extraídas:
 
 > **Captura:** `docs/screenshots/tab_demo.png` *(pendiente)*
 
-Funcionalidade de inferência para novas imagens:
+Funcionalidade de inferência para novas imagens — suporta execução local e remota via Colab:
 
-1. Faça **upload** de uma foto de folha (PNG, JPG, BMP, TIFF)
-2. O sistema extrai as características e compara com todos os protótipos conhecidos
-3. Resultado:
+1. **Modo local (padrão):** Faça **upload** de uma foto de folha (PNG, JPG, BMP, TIFF)
+2. **Modo Colab:** Ative "Usar Colab" na sidebar para que o diagnóstico seja processado remotamente via API ngrok
+3. O sistema extrai as características e compara com todos os protótipos conhecidos
+4. Resultado:
    - **Diagnóstico:** classe predita (nome comum e cultivo)
    - **Confiança:** `1 / (1 + distância_euclidiana)`
    - **Tipo:** doença, praga ou sadio
    - **Top-3** classes mais próximas com distâncias
    - Detalhes do agente causal, sintomas e tratamento sugerido
-4. Se a confiança for muito baixa (< 0.3), o sistema sugere registrar como nova classe
+5. Se a confiança for muito baixa (< 0.3), o sistema sugere registrar como nova classe
 
 ---
 
@@ -423,7 +454,67 @@ Base de dados de referência com informações de todas as classes do PlantVilla
 
 ---
 
-## Métricas de Avaliação
+## Integração com Google Colab
+
+O FSCIL-Lab oferece duas formas de executar o pipeline no **Google Colab**, permitindo usar GPUs gratuitas e contornar limitações de hardware local.
+
+### 1. API Server com ngrok (`colab_api.py`)
+
+Execução remota em tempo real — a app local comunica-se com o Colab via HTTP.
+
+**No Colab (notebook):**
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+
+!pip install numpy scipy scikit-image scikit-learn opencv-python pandas matplotlib flask pyngrok pillow
+
+import sys; sys.path.insert(0, '/content/drive/MyDrive/fscil_lab')
+from colab_api import iniciar_servidor
+iniciar_servidor(data_dir='/content/drive/MyDrive/fscil_lab/data/raw')
+```
+
+**Na app local:**
+1. Sidebar > **Conexión Colab (ngrok)** > colar a URL ngrok gerada no Colab
+2. Aba Configuração > preencher formulário > clicar **"Ejecutar en Colab"** (completo) ou **"Configurar sesión base en Colab"** (incremental)
+3. Aba Ejecución Incremental > clicar **"Ejecutar en Colab"** para cada safra
+4. Aba Diagnóstico de Campo > ativar "Usar Colab" para classificar imagens remotamente
+
+Endpoints da API:
+| Endpoint          | Método | Função                                    |
+|-------------------|--------|-------------------------------------------|
+| `/health`         | GET    | Verifica se o servidor está ativo         |
+| `/iniciar`        | POST   | Carrega dataset, divide sessões, executa base |
+| `/ejecutar-sesion`| POST   | Executa uma sessão incremental            |
+| `/diagnosticar`   | POST   | Classifica uma imagem enviada em base64   |
+| `/resultados`     | GET    | Retorna métricas atuais                   |
+
+### 2. Pipeline Standalone (`colab_pipeline.py`)
+
+Execução assíncrona — o experimento roda completamente no Colab e exporta um JSON.
+
+**No Colab:**
+```python
+!pip install numpy scipy scikit-image scikit-learn opencv-python pandas matplotlib
+
+import sys; sys.path.insert(0, '/content/drive/MyDrive/fscil_lab')
+from colab_pipeline import ejecutar_experimento
+ejecutar_experimento(
+    dataset="plantvillage",
+    data_dir="/content/drive/MyDrive/fscil_lab/data/raw",
+    output_dir="/content/drive/MyDrive/fscil_lab/resultados",
+    num_classes_base=20, n_way=5, k_shot=5,
+    estrategia="media_simples", incluir_hog=False, semilla=42
+)
+```
+
+**Na app local:** Aba Resultados > **Importar resultados de Colab** > fazer upload do JSON gerado.
+
+### 3. Notebook Colab (`notebooks/FSCIL_Colab_Pipeline (3).ipynb`)
+
+Notebook completo e comentado que integra ambos os métodos acima, incluindo montagem do Drive, instalação de dependências e exemplos de execução. Basta fazer upload para o Google Colab e seguir as células.
+
+---
 
 ### Performance Dropping Rate (PD)
 

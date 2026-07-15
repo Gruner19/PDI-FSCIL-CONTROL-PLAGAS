@@ -33,16 +33,17 @@ class MemoriaDePrototipos:
         rotulos_novas_classes: np.ndarray,
     ) -> None:
         """Calcula os centróides das novas classes (agregação vetorizada) e os adiciona à memória."""
+        n_cols = caracteristicas_novas_classes.shape[1]
         dados = pd.DataFrame(
-            {"rotulo": rotulos_novas_classes}
+            {
+                "rotulo": rotulos_novas_classes,
+                **{f"f_{i}": caracteristicas_novas_classes[:, i] for i in range(n_cols)},
+            }
         )
-        for indice_coluna in range(caracteristicas_novas_classes.shape[1]):
-            dados[f"f_{indice_coluna}"] = caracteristicas_novas_classes[:, indice_coluna]
-        colunas_features = [f"f_{i}" for i in range(caracteristicas_novas_classes.shape[1])]
-        centroides = dados.groupby("rotulo")[colunas_features].mean().values
-        rotulos_novos = dados.groupby("rotulo").apply(
-            lambda grupo: grupo.name
-        ).values
+        colunas_features = [f"f_{i}" for i in range(n_cols)]
+        grupos = dados.groupby("rotulo")
+        centroides = grupos[colunas_features].mean().values
+        rotulos_novos = grupos.first().index.values
         if self.prototipos is None:
             self.prototipos = centroides
         else:
